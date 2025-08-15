@@ -35,6 +35,7 @@ type container struct {
 }
 
 var containers map[string]container
+var Logger *log.Logger
 
 func init() {
 	tview.Borders.HorizontalFocus = tview.BoxDrawingsLightHorizontal
@@ -45,13 +46,23 @@ func init() {
 	tview.Borders.BottomRightFocus = tview.BoxDrawingsLightUpAndLeft
 
 	containers = make(map[string]container)
+
+	docker.Init()
 }
 
 func renderViewComposer(ctx context.Context, cli *client.Client, app *tview.Application) *tview.Table {
 	table := tview.NewTable().SetSelectable(true, false)
-	containers := docker.Containers{
+	containers := docker.Containers{ 
 		Client: cli,
 	}
+
+	table.SetBorder(true).SetTitle("Docker Compose Containers (press 'q' to quit)")
+
+	// Headers
+	table.SetCell(0, 0, tview.NewTableCell("[::b]Project").SetAlign(tview.AlignCenter).SetExpansion(2).SetSelectable(false))
+	table.SetCell(0, 1, tview.NewTableCell("[::b]CPU").SetAlign(tview.AlignRight).SetMaxWidth(7).SetSelectable(false))
+	table.SetCell(0, 2, tview.NewTableCell("[::b]Memory").SetAlign(tview.AlignRight).SetMaxWidth(7).SetSelectable(false))
+	table.SetCell(0, 3, tview.NewTableCell("[::b]Cont.").SetAlign(tview.AlignRight).SetSelectable(false))
 
 	_, err := containers.GetProjects(ctx, app, table)
 	if err != nil {
@@ -60,22 +71,6 @@ func renderViewComposer(ctx context.Context, cli *client.Client, app *tview.Appl
 		os.Exit(1)
 	}
 
-	table.SetBorder(true).SetTitle("Docker Compose Containers (press 'q' to quit)")
-
-	// Headers
-	headers := []string{"Project", "CPU"}
-	for i, h := range headers {
-		table.SetCell(0, i, tview.NewTableCell(fmt.Sprintf("[::b]%s", h)).SetAlign(tview.AlignCenter))
-	}
-
-/*
-	i := 0
-	for _, project := range projects {
-		table.SetCell(i+1, 0, tview.NewTableCell(project.Name))
-		table.SetCell(i+1, 1, tview.NewTableCell(fmt.Sprintf("%.2f", project.CPUPercentage)))
-		i++
-	}
-*/
 	return table
 }
 
@@ -86,7 +81,8 @@ func addInput(ctx context.Context, cli *client.Client, app *tview.Application, t
 			addInput(ctx, cli, app, table)
 			app.SetRoot(table, true)
 		}
-		if event.Rune() == '2' {
+		if event.Key() == tcell.KeyEnter {
+			// row, _ := table.GetSelection()
 			// table = renderViewContainers(ctx, cli)
 			// addInput(ctx, cli, app, table)
 			// app.SetRoot(table, true)
@@ -98,6 +94,7 @@ func addInput(ctx context.Context, cli *client.Client, app *tview.Application, t
 		return event
 	})
 }
+
 
 func main() {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -121,4 +118,8 @@ func main() {
 	if err := cli.Close(); err != nil {
 		log.Printf("Error closing Docker client: %v", err)
 	}
+	
+
+		log.Printf("yolo")
+		select {}
 }
