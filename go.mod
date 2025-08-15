@@ -1,4 +1,4 @@
-module github/syrm/c7r
+module github/syrm/c8s
 
 go 1.24
 

@@ -7,7 +7,7 @@ import (
 	_ "log"
 	"os"
 
-	"github/syrm/c7r/docker"
+	"github/syrm/c8s/docker"
 
 	"github.com/docker/docker/client"
 	"github.com/gdamore/tcell/v2"
