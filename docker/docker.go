@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -45,19 +46,19 @@ func NewDocker(ctx context.Context, logger slog.Logger, projectMsg chan<- dto.Pr
 }
 
 func (d *Docker) Run(ctx context.Context) {
-	eg, ctx := errgroup.WithContext(ctx)
+	eg, errCtx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
-		return d.collectContainers(ctx)
+		return d.collectContainers(errCtx)
 	})
 
 	eg.Go(func() error {
-		d.handleEvents(ctx)
+		d.handleEvents(errCtx)
 		return nil
 	})
 
 	if err := eg.Wait(); err != nil {
-		d.logger.ErrorContext(ctx, "error in Docker Run", slog.Any("error", err))
+		d.logger.ErrorContext(errCtx, "error in Docker Run", slog.Any("error", err))
 	}
 }
 
@@ -115,7 +116,7 @@ func (d *Docker) getContainerStats(ctx context.Context, p *project, c *container
 		var stats apiContainer.StatsResponse
 		err := dec.Decode(&stats)
 		if err != nil {
-			if err != io.EOF && err != context.DeadlineExceeded {
+			if err != io.EOF && !errors.Is(err, context.DeadlineExceeded) {
 				d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", c.ID), slog.Any("error", err))
 				break
 			}
@@ -169,7 +170,7 @@ outer:
 				continue
 			}
 
-			c.SetRunninStateFromAction(msg.Action)
+			c.SetRunningStateFromAction(msg.Action)
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "context is done")
 			break outer

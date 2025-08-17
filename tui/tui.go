@@ -70,13 +70,15 @@ func (t *Tui) readProjectMsg(ctx context.Context) {
 				t.tableProject.SetCell(rowIndex, 2, tview.NewTableCell(fmt.Sprintf("%.2f%%", p.MemoryUsagePercentage)).SetAlign(tview.AlignRight))
 				t.tableProject.SetCell(rowIndex, 3, tview.NewTableCell(fmt.Sprintf("%d/%d", p.ContainersRunning, p.ContainersTotal)).SetAlign(tview.AlignRight))
 			})
+		case <-ctx.Done():
+			t.logger.DebugContext(ctx, "context is done")
 		}
 	}
 }
 
 func (t *Tui) Render(ctx context.Context) {
 	go t.readProjectMsg(ctx)
-	
+
 	if err := t.app.SetRoot(t.tableProject, true).EnableMouse(true).Run(); err != nil {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
 		os.Exit(1)

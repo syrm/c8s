@@ -33,7 +33,7 @@ func (c *container) setRunningStateFromState(containerState apiContainer.Contain
 	c.IsRunning = containerState == apiContainer.StateRunning
 }
 
-func (c *container) SetRunninStateFromAction(action events.Action) {
+func (c *container) SetRunningStateFromAction(action events.Action) {
 	c.IsRunning = action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload
 }
 
