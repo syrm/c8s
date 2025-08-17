@@ -11,13 +11,12 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github/syrm/c8s/dto"
-	"github/syrm/c8s/tui"
-
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	dockerClient "github.com/docker/docker/client"
+
+	"github/syrm/c8s/dto"
 )
 
 type Docker struct {
@@ -26,7 +25,6 @@ type Docker struct {
 	projectMsg chan<- dto.Project
 	projects   map[string]*project
 	containers map[string]*container
-	tui        tui.Tui
 }
 
 func NewDocker(ctx context.Context, logger slog.Logger, projectMsg chan<- dto.Project) *Docker {
