@@ -2,22 +2,17 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
-
-	"github/syrm/c8s/dto"
 
 	"github.com/rivo/tview"
 )
 
 type Tui struct {
-	app                 *tview.Application
-	projectMsg          chan dto.Project
-	tableProject        *tview.Table
-	tableProjectData    map[dto.ProjectID]dto.Project
-	tableProjectMapping map[dto.ProjectID]int
-	logger              *slog.Logger
+	app           *tview.Application
+	tableProject  *tview.Table
+	refreshViewCh chan struct{}
+	logger        *slog.Logger
 }
 
 func NewTui(logger *slog.Logger) *Tui {
@@ -30,54 +25,36 @@ func NewTui(logger *slog.Logger) *Tui {
 
 	app := tview.NewApplication()
 
-	t := tview.NewTable().SetSelectable(true, false)
-	t.SetBorder(false)
-
-	t.SetCell(0, 0, tview.NewTableCell("[::b]Project").SetAlign(tview.AlignCenter).SetExpansion(2).SetSelectable(false))
-	t.SetCell(0, 1, tview.NewTableCell("[::b]CPU").SetAlign(tview.AlignRight).SetMaxWidth(7).SetSelectable(false))
-	t.SetCell(0, 2, tview.NewTableCell("[::b]Memory").SetAlign(tview.AlignRight).SetMaxWidth(7).SetSelectable(false))
-	t.SetCell(0, 3, tview.NewTableCell("[::b]Cont.").SetAlign(tview.AlignRight).SetSelectable(false))
+	refreshViewCh := make(chan struct{})
 
 	return &Tui{
-		app:                 app,
-		logger:              logger,
-		projectMsg:          make(chan dto.Project),
-		tableProject:        t,
-		tableProjectData:    make(map[dto.ProjectID]dto.Project),
-		tableProjectMapping: make(map[dto.ProjectID]int),
+		app:           app,
+		logger:        logger,
+		refreshViewCh: refreshViewCh,
 	}
 }
 
-func (t *Tui) GetProjectMsg() chan<- dto.Project {
-	return t.projectMsg
+func (t *Tui) SetProjectTable(projectTable *tview.Table) {
+	t.tableProject = projectTable
 }
 
-func (t *Tui) readProjectMsg(ctx context.Context) {
-	for {
-		select {
-		case p := <-t.projectMsg:
-			rowIndex, ok := t.tableProjectMapping[p.ID]
+func (t *Tui) GetRefreshViewCh() chan<- struct{} {
+	return t.refreshViewCh
+}
 
-			if !ok {
-				rowIndex = t.tableProject.GetRowCount()
-				t.tableProjectMapping[p.ID] = rowIndex
-			}
-			// t.logger.DebugContext(ctx, "tui project msg received", slog.Any("project_id", p.ID), slog.Int("index", rowIndex))
-
+func (t *Tui) HandleRefreshViewRequest() {
+	go func() {
+		for range t.refreshViewCh {
 			t.app.QueueUpdateDraw(func() {
-				t.tableProject.SetCell(rowIndex, 0, tview.NewTableCell(p.Name))
-				t.tableProject.SetCell(rowIndex, 1, tview.NewTableCell(fmt.Sprintf("%.2f%%", p.CPUPercentage)).SetAlign(tview.AlignRight))
-				t.tableProject.SetCell(rowIndex, 2, tview.NewTableCell(fmt.Sprintf("%.2f%%", p.MemoryUsagePercentage)).SetAlign(tview.AlignRight))
-				t.tableProject.SetCell(rowIndex, 3, tview.NewTableCell(fmt.Sprintf("%d/%d", p.ContainersRunning, p.ContainersTotal)).SetAlign(tview.AlignRight))
+				//t.logger.DebugContext(ctx, "refreshing project table")
+				t.tableProject.ScrollToBeginning()
 			})
-		case <-ctx.Done():
-			t.logger.DebugContext(ctx, "context is done")
 		}
-	}
+	}()
 }
 
 func (t *Tui) Render(ctx context.Context) {
-	go t.readProjectMsg(ctx)
+	go t.HandleRefreshViewRequest()
 
 	if err := t.app.SetRoot(t.tableProject, true).EnableMouse(true).Run(); err != nil {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))

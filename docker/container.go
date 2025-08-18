@@ -7,21 +7,25 @@ import (
 	"github.com/docker/docker/api/types/events"
 )
 
-type container struct {
-	ID               string
+type ContainerID string
+
+type Container struct {
+	ID               ContainerID
 	Name             string
 	CPUPercentage    float64
 	MemoryPercentage float64
 	IsRunning        bool
 	ProjectID        string
-	logger           slog.Logger
+	ValueCh          chan<- ContainerValue
+	logger           *slog.Logger
 }
 
-func NewContainer(dockerContainer apiContainer.Summary, projectID string, logger slog.Logger) *container {
-	c := &container{
-		ID:        dockerContainer.ID,
+func NewContainer(dockerContainer apiContainer.Summary, projectID string, valueCh chan<- ContainerValue, logger *slog.Logger) *Container {
+	c := &Container{
+		ID:        ContainerID(dockerContainer.ID),
 		Name:      dockerContainer.Names[0],
 		ProjectID: projectID,
+		ValueCh:   valueCh,
 		logger:    logger,
 	}
 
@@ -29,25 +33,33 @@ func NewContainer(dockerContainer apiContainer.Summary, projectID string, logger
 	return c
 }
 
-func (c *container) setRunningStateFromState(containerState apiContainer.ContainerState) {
+func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
 	c.IsRunning = containerState == apiContainer.StateRunning
 }
 
-func (c *container) SetRunningStateFromAction(action events.Action) {
-	c.IsRunning = action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload
+func (c *Container) SetRunningStateFromAction(action events.Action) {
+	//c.IsRunning = action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload
 }
 
-func (c *container) Update(stats apiContainer.StatsResponse) {
+func (c *Container) Update(stats apiContainer.StatsResponse) {
 	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)
 	c.updateMemoryPercentage(stats.MemoryStats)
 }
 
-func (c *container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
+func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
 	memUsage := c.calculateMemUsageUnixNoCache(memoryStats)
 	c.MemoryPercentage = c.calculateMemPercentUnixNoCache(float64(memoryStats.Limit), memUsage)
+
+	if c.IsRunning {
+		c.ValueCh <- ContainerValue{
+			ID:    c.ID,
+			Type:  ContainerValueTypeMemory,
+			Value: c.MemoryPercentage,
+		}
+	}
 }
 
-func (c *container) calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) float64 {
+func (c *Container) calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) float64 {
 	// https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go
 	// cgroup v1
 	if v, isCgroup1 := mem.Stats["total_inactive_file"]; isCgroup1 && v < mem.Usage {
@@ -60,7 +72,7 @@ func (c *container) calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) f
 	return float64(mem.Usage)
 }
 
-func (c *container) calculateMemPercentUnixNoCache(limit float64, usedNoCache float64) float64 {
+func (c *Container) calculateMemPercentUnixNoCache(limit float64, usedNoCache float64) float64 {
 	// https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go
 	if limit != 0 {
 		return usedNoCache / limit * 100.0
@@ -68,7 +80,7 @@ func (c *container) calculateMemPercentUnixNoCache(limit float64, usedNoCache fl
 	return 0
 }
 
-func (c *container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats apiContainer.CPUStats) {
+func (c *Container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats apiContainer.CPUStats) {
 	// https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go
 	var (
 		cpuPercent = 0.0
@@ -87,4 +99,12 @@ func (c *container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats
 	}
 
 	c.CPUPercentage = cpuPercent
+
+	if c.IsRunning {
+		c.ValueCh <- ContainerValue{
+			ID:    c.ID,
+			Type:  ContainerValueTypeCPU,
+			Value: c.CPUPercentage,
+		}
+	}
 }
