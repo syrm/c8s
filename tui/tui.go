@@ -38,7 +38,7 @@ func NewTui(logger *slog.Logger) *Tui {
 	tui := &Tui{
 		app:              app,
 		logger:           logger,
-		projectUpdated:   make(chan dto.Project),
+		projectUpdated:   make(chan dto.Project, 256),
 		tableProject:     t,
 		tableProjectData: make(map[dto.ProjectID]dto.Project),
 	}
@@ -53,6 +53,7 @@ func (t *Tui) RenderHeader() {
 	t.tableProject.SetCell(0, 1, tview.NewTableCell("[::b]CPU").SetAlign(tview.AlignRight).SetMaxWidth(7).SetSelectable(false))
 	t.tableProject.SetCell(0, 2, tview.NewTableCell("[::b]Memory").SetAlign(tview.AlignRight).SetMaxWidth(7).SetSelectable(false))
 	t.tableProject.SetCell(0, 3, tview.NewTableCell("[::b]Cont.").SetAlign(tview.AlignRight).SetSelectable(false))
+	t.tableProject.SetFixed(1, 0)
 }
 
 func (t *Tui) GetProjectUpdated() chan<- dto.Project {
@@ -124,6 +125,4 @@ func (t *Tui) Render(ctx context.Context) {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
 		os.Exit(1)
 	}
-
-	t.logger.ErrorContext(ctx, "tui exited")
 }
