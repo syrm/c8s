@@ -25,7 +25,7 @@ func main() {
 
 	t := tui.NewTui(logger)
 
-	doc := docker.NewDocker(ctx, *logger, t.GetProjectMsg())
+	doc := docker.NewDocker(ctx, t.GetProjectUpdated(), *logger)
 	go doc.Run(ctx)
 
 	t.Render(ctx)
