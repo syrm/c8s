@@ -77,8 +77,8 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 				return strings.Compare(a.Name, b.Name)
 			})
 
-			for index, project := range projects {
-				t.app.QueueUpdateDraw(func() {
+			t.app.QueueUpdateDraw(func() {
+				for index, project := range projects {
 					t.tableProject.SetCell(index+1, 0, tview.NewTableCell(project.Name))
 					t.tableProject.SetCell(
 						index+1,
@@ -105,8 +105,9 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 							SetAlign(tview.AlignRight),
 					)
 
-				})
-			}
+				}
+			})
+
 		case <-ctx.Done():
 			t.logger.DebugContext(ctx, "context is done")
 		}
