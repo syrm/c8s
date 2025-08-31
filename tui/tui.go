@@ -78,6 +78,8 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 			})
 
 			t.app.QueueUpdateDraw(func() {
+				t.tableProject.Clear()
+				t.RenderHeader()
 				for index, project := range projects {
 					t.tableProject.SetCell(index+1, 0, tview.NewTableCell(project.Name))
 					t.tableProject.SetCell(
@@ -110,6 +112,7 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 
 		case <-ctx.Done():
 			t.logger.DebugContext(ctx, "context is done")
+			return
 		}
 	}
 }
