@@ -20,14 +20,15 @@ import (
 )
 
 type Docker struct {
-	client     *dockerClient.Client
-	logger     slog.Logger
-	projectMsg chan<- dto.Project
-	projects   map[string]*project
-	containers map[string]*container
+	client         *dockerClient.Client
+	projectUpdated chan<- dto.Project
+	projects       map[ProjectID]*Project
+	containers     map[ContainerID]*Container
+	containersLock sync.RWMutex
+	logger         slog.Logger
 }
 
-func NewDocker(ctx context.Context, logger slog.Logger, projectMsg chan<- dto.Project) *Docker {
+func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, logger slog.Logger) *Docker {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))
@@ -35,11 +36,11 @@ func NewDocker(ctx context.Context, logger slog.Logger, projectMsg chan<- dto.Pr
 	}
 
 	return &Docker{
-		client:     cli,
-		logger:     logger,
-		projectMsg: projectMsg,
-		projects:   make(map[string]*project),
-		containers: make(map[string]*container),
+		client:         cli,
+		projectUpdated: projectUpdated,
+		projects:       make(map[ProjectID]*Project),
+		containers:     make(map[ContainerID]*Container),
+		logger:         logger,
 	}
 }
 
@@ -70,25 +71,32 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 	for _, dockerContainer := range dockerContainers {
-		projectID, isProject := dockerContainer.Labels["com.docker.compose.project.working_dir"]
+		projectIDraw, isProject := dockerContainer.Labels["com.docker.compose.project.working_dir"]
 
 		if !isProject {
 			continue
 		}
-
-		c := NewContainer(dockerContainer, projectID, d.logger)
-		d.containers[c.ID] = c
+		projectID := ProjectID(projectIDraw)
 
 		if _, ok := d.projects[projectID]; !ok {
 			d.projects[projectID] = NewProject(
-				dockerContainer.Labels["com.docker.compose.project.working_dir"],
+				projectID,
 				dockerContainer.Labels["com.docker.compose.project"],
+				d.projectUpdated,
+				make(chan ContainerValue),
 			)
+
+			go d.projects[projectID].HandleContainerValue()
 		}
+
+		c := NewContainer(dockerContainer, projectID, d.projects[projectID].GetUpdatedContainerValueCh(), d.logger)
+		d.containersLock.Lock()
+		d.containers[c.ID] = c
+		d.containersLock.Unlock()
 		d.projects[projectID].Containers = append(d.projects[projectID].Containers, c)
 
 		wg.Go(func() {
-			d.getContainerStats(ctx, d.projects[projectID], c)
+			d.getContainerStats(ctx, c)
 		})
 	}
 
@@ -99,10 +107,10 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 	return nil
 }
 
-func (d *Docker) getContainerStats(ctx context.Context, p *project, c *container) {
-	dockerContainerStats, err := d.client.ContainerStats(ctx, c.ID, true)
+func (d *Docker) getContainerStats(ctx context.Context, c *Container) {
+	dockerContainerStats, err := d.client.ContainerStats(ctx, string(c.ID), true)
 	if err != nil {
-		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", c.ID), slog.Any("error", err))
+		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 		return
 	}
 
@@ -115,38 +123,15 @@ func (d *Docker) getContainerStats(ctx context.Context, p *project, c *container
 		err := dec.Decode(&stats)
 		if err != nil {
 			if err != io.EOF && !errors.Is(err, context.DeadlineExceeded) {
-				d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", c.ID), slog.Any("error", err))
+				d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 				break
 			}
 
-			d.logger.InfoContext(ctx, "end of container stats", slog.String("container_id", c.ID), slog.Any("error", err))
+			d.logger.InfoContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 			break
 		}
 
 		c.Update(stats)
-		project := d.projects[c.ProjectID]
-		var projectCPUPercentage float64
-		var projectMemoryPercentage float64
-		var containersRunning int
-
-		for _, c := range project.Containers {
-			projectCPUPercentage += c.CPUPercentage
-			projectMemoryPercentage += c.MemoryPercentage
-
-			if c.IsRunning {
-				containersRunning += 1
-			}
-		}
-
-		p := dto.Project{
-			ID:                    dto.ProjectID(project.ID),
-			Name:                  project.Name,
-			CPUPercentage:         projectCPUPercentage,
-			MemoryUsagePercentage: projectMemoryPercentage,
-			ContainersRunning:     containersRunning,
-			ContainersTotal:       len(project.Containers),
-		}
-		d.projectMsg <- p
 	}
 }
 
@@ -162,7 +147,9 @@ outer:
 		select {
 		case msg := <-msgs:
 			d.logger.DebugContext(ctx, "event", slog.String("action", string(msg.Action)), slog.String("container_id", msg.Actor.ID))
-			c, ok := d.containers[msg.Actor.ID]
+			d.containersLock.RLock()
+			c, ok := d.containers[ContainerID(msg.Actor.ID)]
+			d.containersLock.RUnlock()
 
 			if !ok {
 				continue
