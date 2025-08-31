@@ -20,15 +20,16 @@ import (
 )
 
 type Docker struct {
-	client         *dockerClient.Client
-	projectUpdated chan<- dto.Project
-	projects       map[ProjectID]*Project
-	containers     map[ContainerID]*Container
-	containersLock sync.RWMutex
-	logger         slog.Logger
+	client           *dockerClient.Client
+	projectUpdated   chan<- dto.Project
+	projects         map[ProjectID]*Project
+	containerUpdated chan<- dto.Container
+	containers       map[ContainerID]*Container
+	containersLock   sync.RWMutex
+	logger           slog.Logger
 }
 
-func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, logger slog.Logger) *Docker {
+func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, containerUpdated chan<- dto.Container, logger slog.Logger) *Docker {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))
@@ -36,11 +37,12 @@ func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, logger sl
 	}
 
 	return &Docker{
-		client:         cli,
-		projectUpdated: projectUpdated,
-		projects:       make(map[ProjectID]*Project),
-		containers:     make(map[ContainerID]*Container),
-		logger:         logger,
+		client:           cli,
+		projectUpdated:   projectUpdated,
+		projects:         make(map[ProjectID]*Project),
+		containerUpdated: containerUpdated,
+		containers:       make(map[ContainerID]*Container),
+		logger:           logger,
 	}
 }
 
@@ -89,7 +91,7 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 			go d.projects[projectID].HandleContainerValue()
 		}
 
-		c := NewContainer(dockerContainer, projectID, d.projects[projectID].GetUpdatedContainerValueCh(), d.logger)
+		c := NewContainer(dockerContainer, projectID, d.projects[projectID].GetUpdatedContainerValueCh(), d.containerUpdated, d.logger)
 		d.containersLock.Lock()
 		d.containers[c.ID] = c
 		d.containersLock.Unlock()

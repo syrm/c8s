@@ -5,6 +5,8 @@ import (
 
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+
+	"github/syrm/c8s/dto"
 )
 
 type ContainerValueType int
@@ -26,26 +28,32 @@ type ContainerValue struct {
 
 type Container struct {
 	ID               ContainerID
+	Service          string
 	Name             string
 	CPUPercentage    float64
 	MemoryPercentage float64
 	IsRunning        bool
 	valueUpdatedCh   chan<- ContainerValue
+	containerUpdated chan<- dto.Container
 	ProjectID        ProjectID
 	logger           slog.Logger
 }
 
 func NewContainer(
 	dockerContainer apiContainer.Summary,
-	projectID ProjectID, valueUpdatedCh chan<- ContainerValue,
+	projectID ProjectID,
+	valueUpdatedCh chan<- ContainerValue,
+	containerUpdated chan<- dto.Container,
 	logger slog.Logger,
 ) *Container {
 	c := &Container{
-		ID:             ContainerID(dockerContainer.ID),
-		Name:           dockerContainer.Names[0],
-		ProjectID:      projectID,
-		valueUpdatedCh: valueUpdatedCh,
-		logger:         logger,
+		ID:               ContainerID(dockerContainer.ID),
+		Service:          dockerContainer.Labels["com.docker.compose.service"],
+		Name:             dockerContainer.Names[0],
+		ProjectID:        projectID,
+		valueUpdatedCh:   valueUpdatedCh,
+		containerUpdated: containerUpdated,
+		logger:           logger,
 	}
 
 	c.setRunningStateFromState(dockerContainer.State)
@@ -65,6 +73,14 @@ func (c *Container) SetRunningStateFromAction(action events.Action) {
 func (c *Container) Update(stats apiContainer.StatsResponse) {
 	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)
 	c.updateMemoryPercentage(stats.MemoryStats)
+	c.containerUpdated <- dto.Container{
+		ID:                    dto.ContainerID(c.ID),
+		ProjectID:             dto.ProjectID(c.ProjectID),
+		Service:               c.Service,
+		Name:                  c.Name,
+		CPUPercentage:         c.CPUPercentage,
+		MemoryUsagePercentage: c.MemoryPercentage,
+	}
 }
 
 func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
