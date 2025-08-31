@@ -125,4 +125,6 @@ func (t *Tui) Render(ctx context.Context) {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
 		os.Exit(1)
 	}
+
+	t.logger.ErrorContext(ctx, "tui exited")
 }
