@@ -4,7 +4,6 @@ import (
 	"log/slog"
 
 	apiContainer "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/events"
 )
 
 type ContainerID string
@@ -16,34 +15,44 @@ type Container struct {
 	MemoryPercentage float64
 	IsRunning        bool
 	ProjectID        string
-	ValueCh          chan<- ContainerValue
+	valueUpdatedCh   chan<- ContainerValue
+	updateValueCh    chan ContainerValue
 	logger           *slog.Logger
 }
 
-func NewContainer(dockerContainer apiContainer.Summary, projectID string, valueCh chan<- ContainerValue, logger *slog.Logger) *Container {
+//
+//UpdateValue on envoie un message dans ce channel pour dire au container de mettre a jour cette valeur
+//UpdatedValue le container pousse dans ce channel a d'autres personnes la valeur qu'il a mis a jour
+
+func NewContainer(
+	dockerContainer apiContainer.Summary,
+	projectID string,
+	valueUpdatedCh chan ContainerValue,
+	logger *slog.Logger,
+) *Container {
 	c := &Container{
-		ID:        ContainerID(dockerContainer.ID),
-		Name:      dockerContainer.Names[0],
-		ProjectID: projectID,
-		ValueCh:   valueCh,
-		logger:    logger,
+		ID:             ContainerID(dockerContainer.ID),
+		Name:           dockerContainer.Names[0],
+		ProjectID:      projectID,
+		valueUpdatedCh: valueUpdatedCh,
+		updateValueCh:  make(chan ContainerValue),
+		logger:         logger,
 	}
 
-	c.setRunningStateFromState(dockerContainer.State)
 	return c
 }
 
-func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
-	c.IsRunning = containerState == apiContainer.StateRunning
+func (c *Container) ValueUpdated() chan<- ContainerValue {
+	return c.updateValueCh
 }
 
-func (c *Container) SetRunningStateFromAction(action events.Action) {
-	//c.IsRunning = action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload
-}
-
-func (c *Container) Update(stats apiContainer.StatsResponse) {
-	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)
-	c.updateMemoryPercentage(stats.MemoryStats)
+func (c *Container) updateState(isRunning bool) {
+	c.IsRunning = isRunning
+	c.valueUpdatedCh <- ContainerValue{
+		ID:        c.ID,
+		Type:      ContainerValueState,
+		IsRunning: c.IsRunning,
+	}
 }
 
 func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
@@ -51,7 +60,7 @@ func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats)
 	c.MemoryPercentage = c.calculateMemPercentUnixNoCache(float64(memoryStats.Limit), memUsage)
 
 	if c.IsRunning {
-		c.ValueCh <- ContainerValue{
+		c.valueUpdatedCh <- ContainerValue{
 			ID:    c.ID,
 			Type:  ContainerValueTypeMemory,
 			Value: c.MemoryPercentage,
@@ -101,10 +110,26 @@ func (c *Container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats
 	c.CPUPercentage = cpuPercent
 
 	if c.IsRunning {
-		c.ValueCh <- ContainerValue{
+		c.valueUpdatedCh <- ContainerValue{
 			ID:    c.ID,
 			Type:  ContainerValueTypeCPU,
 			Value: c.CPUPercentage,
+		}
+	}
+}
+
+// HandleUpdateValue is a blocking call that runs until ch is closed.
+func (c *Container) HandleUpdateValue() {
+	for value := range c.updateValueCh {
+		switch value.Type {
+		case ContainerValueTypeCPU:
+			c.updateCPUPercent(value.Stats.CPUStats, value.Stats.PreCPUStats)
+
+		case ContainerValueTypeMemory:
+			c.updateMemoryPercentage(value.Stats.MemoryStats)
+
+		case ContainerValueState:
+			c.updateState(value.IsRunning)
 		}
 	}
 }

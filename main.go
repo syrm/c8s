@@ -2,19 +2,18 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"runtime"
 
-	"github.com/rivo/tview"
+	tea "github.com/charmbracelet/bubbletea/v2"
 
 	"github/syrm/c8s/docker"
 	"github/syrm/c8s/tui"
 )
 
-func main() {
+/*func mainold() {
 	runtime.SetMutexProfileFraction(1)
 
 	ctx := context.Background()
@@ -35,7 +34,7 @@ func main() {
 	// defer cancel()
 
 	tuiC8s := tui.NewTui(logger)
-	projectTableContent := tui.NewProjectTableContent(ctx, tuiC8s.GetRefreshViewCh(), logger)
+	projectTableContent := tui.NewProjectModel(ctx, tuiC8s.GetRefreshViewCh(), logger)
 
 	doc := docker.NewDocker(ctx, logger, projectTableContent.GetUpdateCh())
 	go doc.Run(ctx)
@@ -47,4 +46,27 @@ func main() {
 	tuiC8s.Render(ctx)
 
 	logger.InfoContext(ctx, "c8s is over")
+}*/
+
+func main() {
+	ctx := context.Background()
+
+	file, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	logger := slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug}))
+
+	projectModel := tui.NewProjectModel(ctx, logger)
+
+	doc := docker.NewDocker(ctx, logger, projectModel.GetUpdateCh())
+	go doc.Run(ctx)
+
+	p := tea.NewProgram(projectModel)
+
+	if _, err := p.Run(); err != nil {
+		fmt.Println("Error running program:", err)
+	}
 }

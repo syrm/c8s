@@ -75,22 +75,30 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 			continue
 		}
 
-		p := NewProject(
-			projectID,
-			dockerContainer.Labels["com.docker.compose.project"],
-			d.projectUpdateCh,
-			d.logger,
-		)
-
-		go p.HandleContainerValue()
-
-		c := NewContainer(dockerContainer, projectID, p.GetContainerValueCh(), d.logger)
-
-		d.containers[c.ID] = c
-
 		if _, ok := d.projects[projectID]; !ok {
+			p := NewProject(
+				projectID,
+				dockerContainer.Labels["com.docker.compose.project"],
+				d.projectUpdateCh,
+				d.logger,
+			)
+
+			go p.HandleContainerValue()
+
 			d.projects[projectID] = p
 		}
+
+		// TODO un channel par projet ?
+		c := NewContainer(dockerContainer, projectID, d.projects[projectID].GetContainerValueUpdatedCh(), d.logger)
+		go c.HandleUpdateValue()
+
+		c.ValueUpdated() <- ContainerValue{
+			ID:        c.ID,
+			Type:      ContainerValueState,
+			IsRunning: dockerContainer.State == apiContainer.StateRunning,
+		}
+
+		d.containers[c.ID] = c
 	}
 
 	var wg sync.WaitGroup
@@ -130,7 +138,16 @@ func (d *Docker) getContainerStats(ctx context.Context, p *Project, c *Container
 			break
 		}
 
-		c.Update(stats)
+		c.ValueUpdated() <- ContainerValue{
+			ID:    c.ID,
+			Type:  ContainerValueTypeCPU,
+			Stats: stats,
+		}
+		c.ValueUpdated() <- ContainerValue{
+			ID:    c.ID,
+			Type:  ContainerValueTypeMemory,
+			Stats: stats,
+		}
 	}
 }
 
@@ -152,7 +169,12 @@ outer:
 				continue
 			}
 
-			c.SetRunningStateFromAction(msg.Action)
+			c.ValueUpdated() <- ContainerValue{
+				ID:        c.ID,
+				Type:      ContainerValueState,
+				IsRunning: msg.Action == events.ActionStart || msg.Action == events.ActionUnPause || msg.Action == events.ActionRestart || msg.Action == events.ActionReload,
+			}
+
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "context is done")
 			break outer
