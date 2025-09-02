@@ -85,10 +85,10 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 				projectID,
 				dockerContainer.Labels["com.docker.compose.project"],
 				d.projectUpdated,
-				make(chan ContainerValue),
+				make(chan ContainerValue, 256),
 			)
 
-			go d.projects[projectID].HandleContainerValue()
+			go d.projects[projectID].HandleContainerValue(ctx)
 		}
 
 		c := NewContainer(dockerContainer, projectID, d.projects[projectID].GetUpdatedContainerValueCh(), d.containerUpdated, d.logger)
@@ -144,7 +144,6 @@ func (d *Docker) handleEvents(ctx context.Context) {
 
 	d.logger.DebugContext(ctx, "handleEvents")
 
-outer:
 	for {
 		select {
 		case msg := <-msgs:
@@ -159,8 +158,9 @@ outer:
 
 			c.SetRunningStateFromAction(msg.Action)
 		case <-ctx.Done():
-			d.logger.DebugContext(ctx, "context is done")
-			break outer
+			d.logger.DebugContext(ctx, "readProjectUpdated context is done")
+			return
+
 		case err := <-errs:
 			d.logger.ErrorContext(ctx, "event", slog.Any("error", err))
 		}

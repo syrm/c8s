@@ -122,7 +122,7 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 			})
 
 		case <-ctx.Done():
-			t.logger.DebugContext(ctx, "context is done")
+			t.logger.DebugContext(ctx, "readProjectUpdated context is done")
 			return
 		}
 	}
@@ -188,7 +188,7 @@ func (t *Tui) readContainerUpdated(ctx context.Context) {
 			})
 
 		case <-ctx.Done():
-			t.logger.DebugContext(ctx, "context is done")
+			t.logger.DebugContext(ctx, "readContainerUpdated context is done")
 			return
 		}
 	}

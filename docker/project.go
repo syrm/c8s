@@ -1,6 +1,11 @@
 package docker
 
-import "github.com/syrm/c8s/dto"
+import (
+	"context"
+	"log/slog"
+
+	"github.com/syrm/c8s/dto"
+)
 
 type ProjectID string
 
@@ -13,6 +18,7 @@ type Project struct {
 	ContainersCPU         map[ContainerID]float64
 	ContainersMemory      map[ContainerID]float64
 	ContainersState       map[ContainerID]bool
+	logger                *slog.Logger
 }
 
 func NewProject(id ProjectID, name string, projectUpdated chan<- dto.Project, updatedContainerValue chan ContainerValue) *Project {
@@ -33,50 +39,58 @@ func (p *Project) GetUpdatedContainerValueCh() chan<- ContainerValue {
 }
 
 // HandleContainerValue is a blocking call that runs until ch is closed.
-func (p *Project) HandleContainerValue() {
-	for value := range p.updatedContainerValue {
-		switch value.Type {
-		case ContainerValueCPU:
-			p.ContainersCPU[value.ID] = value.Value
+func (p *Project) HandleContainerValue(ctx context.Context) {
+	for {
+		select {
+		case value := <-p.updatedContainerValue:
+			switch value.Type {
+			case ContainerValueCPU:
+				p.ContainersCPU[value.ID] = value.Value
 
-		case ContainerValueMemory:
-			p.ContainersMemory[value.ID] = value.Value
+			case ContainerValueMemory:
+				p.ContainersMemory[value.ID] = value.Value
 
-		case ContainerValueState:
-			p.ContainersState[value.ID] = value.IsRunning
-		}
+			case ContainerValueState:
+				p.ContainersState[value.ID] = value.IsRunning
 
-		containerRunning := 0
-		for _, isRunning := range p.ContainersState {
-			if isRunning {
-				containerRunning++
 			}
+
+			containerRunning := 0
+			for _, isRunning := range p.ContainersState {
+				if isRunning {
+					containerRunning++
+				}
+			}
+
+			//if containerRunning == 0 {
+			//	// No containers running, skip update
+			//	continue
+			//}
+
+			dtoProject := dto.Project{
+				ID:                    dto.ProjectID(p.ID),
+				Name:                  p.Name,
+				CPUPercentage:         p.cpuPercentage(),
+				MemoryUsagePercentage: p.MemoryPercentage(),
+				ContainersRunning:     containerRunning,
+				ContainersTotal:       len(p.ContainersState),
+			}
+
+			//p.Logger.Info(
+			//	"Project updated",
+			//	slog.String("project_id", p.ID),
+			//	slog.Float64("cpu", dtoProject.CPUPercentage),
+			//	slog.Float64("memory", dtoProject.MemoryUsagePercentage),
+			//	slog.Int("container_running", containerRunning),
+			//	slog.Int("container_total", len(p.ContainersState)),
+			//)
+
+			p.projectUpdated <- dtoProject
+
+		case <-ctx.Done():
+			p.logger.DebugContext(ctx, "HandleContainerValue context is done")
+			return
 		}
-
-		//if containerRunning == 0 {
-		//	// No containers running, skip update
-		//	continue
-		//}
-
-		dtoProject := dto.Project{
-			ID:                    dto.ProjectID(p.ID),
-			Name:                  p.Name,
-			CPUPercentage:         p.cpuPercentage(),
-			MemoryUsagePercentage: p.MemoryPercentage(),
-			ContainersRunning:     containerRunning,
-			ContainersTotal:       len(p.ContainersState),
-		}
-
-		//p.Logger.Info(
-		//	"Project updated",
-		//	slog.String("project_id", p.ID),
-		//	slog.Float64("cpu", dtoProject.CPUPercentage),
-		//	slog.Float64("memory", dtoProject.MemoryUsagePercentage),
-		//	slog.Int("container_running", containerRunning),
-		//	slog.Int("container_total", len(p.ContainersState)),
-		//)
-
-		p.projectUpdated <- dtoProject
 	}
 }
 
