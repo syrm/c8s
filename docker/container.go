@@ -33,7 +33,7 @@ type Container struct {
 	CPUPercentage    float64
 	MemoryPercentage float64
 	IsRunning        bool
-	valueUpdatedCh   chan<- ContainerValue
+	valueUpdated     chan<- ContainerValue
 	containerUpdated chan<- dto.Container
 	ProjectID        ProjectID
 	logger           *slog.Logger
@@ -42,7 +42,7 @@ type Container struct {
 func NewContainer(
 	dockerContainer apiContainer.Summary,
 	projectID ProjectID,
-	valueUpdatedCh chan<- ContainerValue,
+	valueUpdated chan<- ContainerValue,
 	containerUpdated chan<- dto.Container,
 	logger *slog.Logger,
 ) *Container {
@@ -51,7 +51,7 @@ func NewContainer(
 		Service:          dockerContainer.Labels["com.docker.compose.service"],
 		Name:             dockerContainer.Names[0],
 		ProjectID:        projectID,
-		valueUpdatedCh:   valueUpdatedCh,
+		valueUpdated:     valueUpdated,
 		containerUpdated: containerUpdated,
 		logger:           logger,
 	}
@@ -134,12 +134,12 @@ func (c *Container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats
 
 // non-blocking publish; drops if no reader
 func (c *Container) tryPublishValue(v ContainerValue) {
-	if c.valueUpdatedCh == nil {
+	if c.valueUpdated == nil {
 		return
 	}
 
 	select {
-	case c.valueUpdatedCh <- v:
+	case c.valueUpdated <- v:
 	default:
 		c.logger.Warn("dropped container value update", "container", c.ID, "type", v.Type)
 	}
