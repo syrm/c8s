@@ -26,10 +26,10 @@ type Docker struct {
 	containerUpdated chan<- dto.Container
 	containers       map[ContainerID]*Container
 	containersLock   sync.RWMutex
-	logger           slog.Logger
+	logger           *slog.Logger
 }
 
-func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, containerUpdated chan<- dto.Container, logger slog.Logger) *Docker {
+func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, containerUpdated chan<- dto.Container, logger *slog.Logger) *Docker {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))

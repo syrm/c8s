@@ -36,7 +36,7 @@ type Container struct {
 	valueUpdatedCh   chan<- ContainerValue
 	containerUpdated chan<- dto.Container
 	ProjectID        ProjectID
-	logger           slog.Logger
+	logger           *slog.Logger
 }
 
 func NewContainer(
@@ -44,7 +44,7 @@ func NewContainer(
 	projectID ProjectID,
 	valueUpdatedCh chan<- ContainerValue,
 	containerUpdated chan<- dto.Container,
-	logger slog.Logger,
+	logger *slog.Logger,
 ) *Container {
 	c := &Container{
 		ID:               ContainerID(dockerContainer.ID),
