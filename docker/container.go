@@ -62,12 +62,12 @@ func NewContainer(
 
 func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
 	c.IsRunning = containerState == apiContainer.StateRunning
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning})
 }
 
 func (c *Container) SetRunningStateFromAction(action events.Action) {
 	c.IsRunning = action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning})
 }
 
 func (c *Container) Update(stats apiContainer.StatsResponse) {
@@ -86,7 +86,7 @@ func (c *Container) Update(stats apiContainer.StatsResponse) {
 func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
 	memUsage := c.calculateMemUsageUnixNoCache(memoryStats)
 	c.MemoryPercentage = c.calculateMemPercentUnixNoCache(float64(memoryStats.Limit), memUsage)
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueMemory, Value: c.MemoryPercentage}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueMemory, Value: c.MemoryPercentage})
 }
 
 func (c *Container) calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) float64 {
@@ -129,5 +129,18 @@ func (c *Container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats
 	}
 
 	c.CPUPercentage = cpuPercent
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueCPU, Value: c.CPUPercentage}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueCPU, Value: c.CPUPercentage})
+}
+
+// non-blocking publish; drops if no reader
+func (c *Container) tryPublishValue(v ContainerValue) {
+	if c.valueUpdatedCh == nil {
+		return
+	}
+
+	select {
+	case c.valueUpdatedCh <- v:
+	default:
+		c.logger.Warn("dropped container value update", "container", c.ID, "type", v.Type)
+	}
 }
