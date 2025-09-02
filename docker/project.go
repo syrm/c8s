@@ -1,6 +1,6 @@
 package docker
 
-import "github/syrm/c8s/dto"
+import "github.com/syrm/c8s/dto"
 
 type ProjectID string
 

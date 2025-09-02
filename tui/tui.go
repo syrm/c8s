@@ -8,24 +8,26 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/gdamore/tcell/v2"
 
-	"github/syrm/c8s/dto"
+	"github.com/syrm/c8s/dto"
 
 	"github.com/rivo/tview"
 )
 
 type Tui struct {
-	app                *tview.Application
-	projectUpdated     chan dto.Project
-	tableProject       *tview.Table
-	tableProjectData   map[dto.ProjectID]dto.Project
-	containerUpdated   chan dto.Container
-	tableContainer     *tview.Table
-	tableContainerData map[dto.ContainerID]dto.Container
-	currentProjectID   dto.ProjectID
-	logger             *slog.Logger
+	app                  *tview.Application
+	projectUpdated       chan dto.Project
+	tableProject         *tview.Table
+	tableProjectData     map[dto.ProjectID]dto.Project
+	tableProjectDataLock sync.RWMutex
+	containerUpdated     chan dto.Container
+	tableContainer       *tview.Table
+	tableContainerData   map[dto.ContainerID]dto.Container
+	currentProjectID     dto.ProjectID
+	logger               *slog.Logger
 }
 
 func NewTui(logger *slog.Logger) *Tui {
@@ -64,7 +66,8 @@ func NewTui(logger *slog.Logger) *Tui {
 					break
 				}
 			}
-
+			tui.tableContainer.Clear()
+			tui.drawContainers()
 			tui.app.SetRoot(tui.tableContainer, true)
 		}
 
@@ -109,101 +112,12 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 	for {
 		select {
 		case p := <-t.projectUpdated:
+			t.tableProjectDataLock.Lock()
 			t.tableProjectData[p.ID] = p
-
-			//rowSelected, _ := t.tableProject.GetSelection()
-			//rowSelected -= 1
-			//var projects []dto.Project
-			//var projectSelected dto.Project
-			//for _, p := range t.tableProjectData {
-			//	if t.tableProject.GetCell(rowSelected, 0).Text == p.Name {
-			//		projectSelected = p
-			//		continue
-			//	}
-			//	projects = append(projects, p)
-			//}
-			//
-			projects := slices.SortedStableFunc(maps.Values(t.tableProjectData), func(a, b dto.Project) int {
-				if a.CPUPercentage < b.CPUPercentage {
-					return 1
-				}
-
-				if a.CPUPercentage > b.CPUPercentage {
-					return -1
-				}
-
-				return strings.Compare(a.Name, b.Name)
-			})
-			//
-			//if rowSelected == 0 {
-			//	projects = append([]dto.Project{projectSelected}, projects...)
-			//} else {
-			//	projectsTmp := projects[:rowSelected-1]
-			//	projectsTmp = append(projectsTmp, projectSelected)
-			//	projects = append(projectsTmp, projects[rowSelected:]...)
-			//}
-
-			//rowSelected := 3
-			//projects := slices.Collect(maps.Values(t.tableProjectData))
-			//
-			//if len(projects) > 3 {
-			//	projectSelected := projects[rowSelected]
-			//	copy(projects[rowSelected:], projects[rowSelected+1:])
-			//	slices.SortStableFunc(projects[:len(projects)-1], func(a, b dto.Project) int {
-			//		if a.CPUPercentage < b.CPUPercentage {
-			//			return 1
-			//		}
-			//
-			//		if a.CPUPercentage > b.CPUPercentage {
-			//			return -1
-			//		}
-			//
-			//		return strings.Compare(a.Name, b.Name)
-			//	})
-			//	copy(projects[rowSelected+1:], projects[rowSelected:len(projects)-1])
-			//	projects[rowSelected] = projectSelected
-			//}
+			t.tableProjectDataLock.Unlock()
 
 			t.app.QueueUpdateDraw(func() {
-				t.tableProject.Clear()
-				t.RenderProjectHeader()
-				offset := 0
-				for index, project := range projects {
-					//rowSelected, _ := t.tableProject.GetSelection()
-					//if index+1 == rowSelected {
-					//	offset = 1
-					//}
-					//
-					//if t.tableProject.GetCell(rowSelected, 0).Text == project.Name {
-					//	continue
-					//}
-
-					t.tableProject.SetCell(index+1+offset, 0, tview.NewTableCell(project.Name))
-					t.tableProject.SetCell(
-						index+1+offset,
-						1,
-						tview.NewTableCell(
-							fmt.Sprintf("%.2f%%", project.CPUPercentage),
-						).
-							SetAlign(tview.AlignRight),
-					)
-					t.tableProject.SetCell(
-						index+1+offset,
-						2,
-						tview.NewTableCell(
-							fmt.Sprintf("%.2f%%", project.MemoryUsagePercentage),
-						).
-							SetAlign(tview.AlignRight),
-					)
-					t.tableProject.SetCell(
-						index+1+offset,
-						3,
-						tview.NewTableCell(
-							fmt.Sprintf("%d/%d", project.ContainersRunning, project.ContainersTotal),
-						).
-							SetAlign(tview.AlignRight),
-					)
-				}
+				t.drawProjects()
 			})
 
 		case <-ctx.Done():
@@ -213,58 +127,108 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 	}
 }
 
+func (t *Tui) drawProjects() {
+	projects := slices.SortedStableFunc(maps.Values(t.tableProjectData), func(a, b dto.Project) int {
+		if a.CPUPercentage < b.CPUPercentage {
+			return 1
+		}
+
+		if a.CPUPercentage > b.CPUPercentage {
+			return -1
+		}
+
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	t.tableProject.Clear()
+	t.RenderProjectHeader()
+	offset := 0
+	for index, project := range projects {
+		t.tableProject.SetCell(index+1+offset, 0, tview.NewTableCell(project.Name))
+		t.tableProject.SetCell(
+			index+1+offset,
+			1,
+			tview.NewTableCell(
+				fmt.Sprintf("%.2f%%", project.CPUPercentage),
+			).
+				SetAlign(tview.AlignRight),
+		)
+		t.tableProject.SetCell(
+			index+1+offset,
+			2,
+			tview.NewTableCell(
+				fmt.Sprintf("%.2f%%", project.MemoryUsagePercentage),
+			).
+				SetAlign(tview.AlignRight),
+		)
+		t.tableProject.SetCell(
+			index+1+offset,
+			3,
+			tview.NewTableCell(
+				fmt.Sprintf("%d/%d", project.ContainersRunning, project.ContainersTotal),
+			).
+				SetAlign(tview.AlignRight),
+		)
+	}
+}
+
 func (t *Tui) readContainerUpdated(ctx context.Context) {
 	for {
 		select {
 		case c := <-t.containerUpdated:
 			t.tableContainerData[c.ID] = c
-
-			containers := slices.SortedStableFunc(maps.Values(t.tableContainerData), func(a, b dto.Container) int {
-				if a.CPUPercentage < b.CPUPercentage {
-					return 1
-				}
-
-				if a.CPUPercentage > b.CPUPercentage {
-					return -1
-				}
-
-				return strings.Compare(a.Name, b.Name)
-			})
-
 			t.app.QueueUpdateDraw(func() {
-				t.tableContainer.Clear()
-				t.RenderContainerHeader(t.tableProjectData[t.currentProjectID].Name)
-				index := 0
-				for _, container := range containers {
-					if container.ProjectID != t.currentProjectID {
-						continue
-					}
-					index += 1
-
-					t.tableContainer.SetCell(index, 0, tview.NewTableCell(container.Service))
-					t.tableContainer.SetCell(
-						index,
-						1,
-						tview.NewTableCell(
-							fmt.Sprintf("%.2f%%", container.CPUPercentage),
-						).
-							SetAlign(tview.AlignRight),
-					)
-					t.tableContainer.SetCell(
-						index,
-						2,
-						tview.NewTableCell(
-							fmt.Sprintf("%.2f%%", container.MemoryUsagePercentage),
-						).
-							SetAlign(tview.AlignRight),
-					)
-				}
+				t.drawContainers()
 			})
 
 		case <-ctx.Done():
 			t.logger.DebugContext(ctx, "context is done")
 			return
 		}
+	}
+}
+
+func (t *Tui) drawContainers() {
+	containers := slices.SortedStableFunc(maps.Values(t.tableContainerData), func(a, b dto.Container) int {
+		if a.CPUPercentage < b.CPUPercentage {
+			return 1
+		}
+
+		if a.CPUPercentage > b.CPUPercentage {
+			return -1
+		}
+
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	t.tableContainer.Clear()
+	t.tableProjectDataLock.RLock()
+	t.RenderContainerHeader(t.tableProjectData[t.currentProjectID].Name)
+	t.tableProjectDataLock.RUnlock()
+	index := 0
+	for _, container := range containers {
+		if container.ProjectID != t.currentProjectID {
+			continue
+		}
+		index += 1
+
+		t.tableContainer.SetCell(index, 0, tview.NewTableCell(container.Service))
+		t.tableContainer.SetCell(
+			index,
+			1,
+			tview.NewTableCell(
+				fmt.Sprintf("%.2f%%", container.CPUPercentage),
+			).
+				SetAlign(tview.AlignRight),
+		)
+		t.tableContainer.SetCell(
+			index,
+			2,
+			tview.NewTableCell(
+				fmt.Sprintf("%.2f%%", container.MemoryUsagePercentage),
+			).
+				SetAlign(tview.AlignRight),
+		)
 	}
 }
 
@@ -276,6 +240,4 @@ func (t *Tui) Render(ctx context.Context) {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
 		os.Exit(1)
 	}
-
-	t.logger.ErrorContext(ctx, "tui exited")
 }

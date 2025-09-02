@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github/syrm/c8s/docker"
-	"github/syrm/c8s/tui"
+	"github.com/syrm/c8s/docker"
+	"github.com/syrm/c8s/tui"
 )
 
 func main() {

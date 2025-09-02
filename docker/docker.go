@@ -16,7 +16,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	dockerClient "github.com/docker/docker/client"
 
-	"github/syrm/c8s/dto"
+	"github.com/syrm/c8s/dto"
 )
 
 type Docker struct {

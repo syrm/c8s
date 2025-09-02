@@ -1,4 +1,4 @@
-module github/syrm/c8s
+module github.com/syrm/c8s
 
 go 1.25
 

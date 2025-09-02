@@ -6,7 +6,7 @@ import (
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 
-	"github/syrm/c8s/dto"
+	"github.com/syrm/c8s/dto"
 )
 
 type ContainerValueType int
