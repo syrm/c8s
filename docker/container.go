@@ -5,6 +5,8 @@ import (
 
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+
+	"github.com/syrm/c8s/dto"
 )
 
 type ContainerValueType int
@@ -26,26 +28,32 @@ type ContainerValue struct {
 
 type Container struct {
 	ID               ContainerID
+	Service          string
 	Name             string
 	CPUPercentage    float64
 	MemoryPercentage float64
 	IsRunning        bool
-	valueUpdatedCh   chan<- ContainerValue
+	valueUpdated     chan<- ContainerValue
+	containerUpdated chan<- dto.Container
 	ProjectID        ProjectID
-	logger           slog.Logger
+	logger           *slog.Logger
 }
 
 func NewContainer(
 	dockerContainer apiContainer.Summary,
-	projectID ProjectID, valueUpdatedCh chan<- ContainerValue,
-	logger slog.Logger,
+	projectID ProjectID,
+	valueUpdated chan<- ContainerValue,
+	containerUpdated chan<- dto.Container,
+	logger *slog.Logger,
 ) *Container {
 	c := &Container{
-		ID:             ContainerID(dockerContainer.ID),
-		Name:           dockerContainer.Names[0],
-		ProjectID:      projectID,
-		valueUpdatedCh: valueUpdatedCh,
-		logger:         logger,
+		ID:               ContainerID(dockerContainer.ID),
+		Service:          dockerContainer.Labels["com.docker.compose.service"],
+		Name:             dockerContainer.Names[0],
+		ProjectID:        projectID,
+		valueUpdated:     valueUpdated,
+		containerUpdated: containerUpdated,
+		logger:           logger,
 	}
 
 	c.setRunningStateFromState(dockerContainer.State)
@@ -54,23 +62,31 @@ func NewContainer(
 
 func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
 	c.IsRunning = containerState == apiContainer.StateRunning
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning})
 }
 
 func (c *Container) SetRunningStateFromAction(action events.Action) {
 	c.IsRunning = action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning})
 }
 
 func (c *Container) Update(stats apiContainer.StatsResponse) {
 	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)
 	c.updateMemoryPercentage(stats.MemoryStats)
+	c.containerUpdated <- dto.Container{
+		ID:                    dto.ContainerID(c.ID),
+		ProjectID:             dto.ProjectID(c.ProjectID),
+		Service:               c.Service,
+		Name:                  c.Name,
+		CPUPercentage:         c.CPUPercentage,
+		MemoryUsagePercentage: c.MemoryPercentage,
+	}
 }
 
 func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
 	memUsage := c.calculateMemUsageUnixNoCache(memoryStats)
 	c.MemoryPercentage = c.calculateMemPercentUnixNoCache(float64(memoryStats.Limit), memUsage)
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueMemory, Value: c.MemoryPercentage}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueMemory, Value: c.MemoryPercentage})
 }
 
 func (c *Container) calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) float64 {
@@ -113,5 +129,18 @@ func (c *Container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats
 	}
 
 	c.CPUPercentage = cpuPercent
-	c.valueUpdatedCh <- ContainerValue{ID: c.ID, Type: ContainerValueCPU, Value: c.CPUPercentage}
+	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueCPU, Value: c.CPUPercentage})
+}
+
+// non-blocking publish; drops if no reader
+func (c *Container) tryPublishValue(v ContainerValue) {
+	if c.valueUpdated == nil {
+		return
+	}
+
+	select {
+	case c.valueUpdated <- v:
+	default:
+		c.logger.Warn("dropped container value update", "container", c.ID, "type", v.Type)
+	}
 }
