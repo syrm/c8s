@@ -18,16 +18,17 @@ import (
 )
 
 type Tui struct {
-	app                  *tview.Application
-	projectUpdated       chan dto.Project
-	tableProject         *tview.Table
-	tableProjectData     map[dto.ProjectID]dto.Project
-	tableProjectDataLock sync.RWMutex
-	containerUpdated     chan dto.Container
-	tableContainer       *tview.Table
-	tableContainerData   map[dto.ContainerID]dto.Container
-	currentProjectID     dto.ProjectID
-	logger               *slog.Logger
+	app                    *tview.Application
+	projectUpdated         chan dto.Project
+	tableProject           *tview.Table
+	tableProjectData       map[dto.ProjectID]dto.Project
+	tableProjectDataLock   sync.RWMutex
+	containerUpdated       chan dto.Container
+	tableContainer         *tview.Table
+	tableContainerData     map[dto.ContainerID]dto.Container
+	tableContainerDataLock sync.RWMutex
+	currentProjectID       dto.ProjectID
+	logger                 *slog.Logger
 }
 
 func NewTui(logger *slog.Logger) *Tui {
@@ -176,7 +177,10 @@ func (t *Tui) readContainerUpdated(ctx context.Context) {
 	for {
 		select {
 		case c := <-t.containerUpdated:
+			t.tableContainerDataLock.Lock()
 			t.tableContainerData[c.ID] = c
+			t.tableContainerDataLock.Unlock()
+
 			t.app.QueueUpdateDraw(func() {
 				t.drawContainers()
 			})
@@ -189,6 +193,7 @@ func (t *Tui) readContainerUpdated(ctx context.Context) {
 }
 
 func (t *Tui) drawContainers() {
+	t.tableContainerDataLock.RLock()
 	containers := slices.SortedStableFunc(maps.Values(t.tableContainerData), func(a, b dto.Container) int {
 		if a.CPUPercentage < b.CPUPercentage {
 			return 1
@@ -200,6 +205,7 @@ func (t *Tui) drawContainers() {
 
 		return strings.Compare(a.Name, b.Name)
 	})
+	t.tableContainerDataLock.RUnlock()
 
 	t.tableContainer.Clear()
 	t.tableProjectDataLock.RLock()
