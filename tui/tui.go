@@ -129,7 +129,9 @@ func (t *Tui) readProjectUpdated(ctx context.Context) {
 }
 
 func (t *Tui) drawProjects() {
-	projects := slices.SortedStableFunc(maps.Values(t.tableProjectData), func(a, b dto.Project) int {
+	projects := slices.Collect(maps.Values(t.tableProjectData))
+
+	slices.SortStableFunc(projects, func(a, b dto.Project) int {
 		if a.CPUPercentage < b.CPUPercentage {
 			return 1
 		}
