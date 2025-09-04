@@ -21,14 +21,14 @@ import (
 
 type Docker struct {
 	client           *dockerClient.Client
-	containerUpdated chan<- dto.Container
+	containerUpdated chan<- dto.ContainerDeletable
 	containers       map[ContainerID]*Container
 	containersLock   sync.RWMutex
 	newContainer     chan apiContainer.Summary
 	logger           *slog.Logger
 }
 
-func NewDocker(ctx context.Context, containerUpdated chan<- dto.Container, logger *slog.Logger) *Docker {
+func NewDocker(ctx context.Context, containerUpdated chan<- dto.ContainerDeletable, logger *slog.Logger) *Docker {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))
@@ -116,8 +116,7 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		delete(d.containers, c.ID)
 		d.containersLock.Unlock()
 
-		c.Deleted = true
-		c.tryPublish()
+		c.tryUnpublish()
 
 		return
 	}
@@ -172,13 +171,15 @@ func (d *Docker) handleEvents(ctx context.Context) {
 
 			if ok {
 				c.SetRunningStateFromAction(msg.Action)
-				continue
-			}
 
-			if msg.Action == events.ActionDestroy {
-				d.containersLock.Lock()
-				delete(d.containers, ContainerID(msg.Actor.ID))
-				d.containersLock.Unlock()
+				if msg.Action == events.ActionDestroy {
+					d.containersLock.Lock()
+					delete(d.containers, ContainerID(msg.Actor.ID))
+					d.containersLock.Unlock()
+
+					c.tryUnpublish()
+				}
+				continue
 			}
 
 			state := apiContainer.StateExited

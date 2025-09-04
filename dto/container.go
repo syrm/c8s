@@ -2,6 +2,10 @@ package dto
 
 type ContainerID string
 
+type ContainerDeletable interface {
+	Deleted() bool
+}
+
 type Container struct {
 	ID                    ContainerID
 	Project               Project
@@ -10,5 +14,16 @@ type Container struct {
 	CPUPercentage         float64
 	MemoryUsagePercentage float64
 	IsRunning             bool
-	Deleted               bool
+}
+
+func (c Container) Deleted() bool {
+	return false
+}
+
+type ContainerDeleted struct {
+	ID ContainerID
+}
+
+func (c ContainerDeleted) Deleted() bool {
+	return true
 }

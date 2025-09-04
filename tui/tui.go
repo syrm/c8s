@@ -22,7 +22,7 @@ type Tui struct {
 	tableProject           *tview.Table
 	tableProjectData       map[ProjectID]Project
 	tableProjectDataLock   sync.RWMutex
-	containerUpdated       chan dto.Container
+	containerUpdated       chan dto.ContainerDeletable
 	tableContainer         *tview.Table
 	tableContainerData     map[dto.ContainerID]dto.Container
 	tableContainerDataLock sync.RWMutex
@@ -51,7 +51,7 @@ func NewTui(logger *slog.Logger) *Tui {
 		logger:             logger,
 		tableProject:       tableProject,
 		tableProjectData:   make(map[ProjectID]Project),
-		containerUpdated:   make(chan dto.Container, 256),
+		containerUpdated:   make(chan dto.ContainerDeletable, 256),
 		tableContainer:     tableContainer,
 		tableContainerData: make(map[dto.ContainerID]dto.Container),
 	}
@@ -99,8 +99,96 @@ func (t *Tui) RenderContainerHeader(project string) {
 	t.tableContainer.SetFixed(1, 0)
 }
 
-func (t *Tui) GetContainerUpdated() chan<- dto.Container {
+func (t *Tui) GetContainerUpdated() chan<- dto.ContainerDeletable {
 	return t.containerUpdated
+}
+
+func (t *Tui) readContainerUpdated(ctx context.Context) {
+	for {
+		select {
+		case c := <-t.containerUpdated:
+			switch c := c.(type) {
+			case dto.ContainerDeleted:
+				t.tableContainerDataLock.Lock()
+				delete(t.tableContainerData, c.ID)
+				t.tableContainerDataLock.Unlock()
+
+				t.tableProjectDataLock.Lock()
+				for projectID, project := range t.tableProjectData {
+					if _, exists := project.ContainersCPU[c.ID]; exists {
+						project.CPUPercentage -= project.ContainersCPU[c.ID]
+						delete(project.ContainersCPU, c.ID)
+					}
+
+					if _, exists := project.ContainersMemory[c.ID]; exists {
+						project.MemoryUsagePercentage -= project.ContainersMemory[c.ID]
+						delete(project.ContainersMemory, c.ID)
+					}
+
+					if isRunning, exists := project.ContainersState[c.ID]; exists {
+						if isRunning {
+							project.ContainersRunning -= 1
+						}
+					}
+					delete(project.ContainersState, c.ID)
+
+					t.tableProjectData[projectID] = project
+				}
+				t.tableProjectDataLock.Unlock()
+			case dto.Container:
+				t.tableContainerDataLock.Lock()
+				t.tableContainerData[c.ID] = c
+				t.tableContainerDataLock.Unlock()
+
+				projectID := ProjectID(c.Project.ID)
+
+				t.tableProjectDataLock.RLock()
+				project, projectExist := t.tableProjectData[projectID]
+				t.tableProjectDataLock.RUnlock()
+
+				if !projectExist {
+					project = Project{
+						ID:               projectID,
+						Name:             c.Project.Name,
+						ContainersCPU:    make(map[dto.ContainerID]float64),
+						ContainersMemory: make(map[dto.ContainerID]float64),
+						ContainersState:  make(map[dto.ContainerID]bool),
+					}
+				}
+
+				project.CPUPercentage += c.CPUPercentage - project.ContainersCPU[c.ID]
+				project.ContainersCPU[c.ID] = c.CPUPercentage
+
+				project.MemoryUsagePercentage += c.MemoryUsagePercentage - project.ContainersMemory[c.ID]
+				project.ContainersMemory[c.ID] = c.MemoryUsagePercentage
+
+				isRunning := 0
+				if c.IsRunning {
+					isRunning = 1
+				}
+
+				previousRunning := 0
+				if project.ContainersState[c.ID] {
+					previousRunning = 1
+				}
+
+				project.ContainersRunning += isRunning - previousRunning
+				project.ContainersState[c.ID] = c.IsRunning
+
+				t.tableProjectDataLock.Lock()
+				t.tableProjectData[projectID] = project
+				t.tableProjectDataLock.Unlock()
+
+				t.app.QueueUpdateDraw(func() {
+					t.drawContainers()
+					t.drawProjects()
+				})
+			}
+		case <-ctx.Done():
+			t.logger.DebugContext(ctx, "readContainerUpdated context is done")
+			return
+		}
+	}
 }
 
 func (t *Tui) drawProjects() {
@@ -147,65 +235,6 @@ func (t *Tui) drawProjects() {
 			).
 				SetAlign(tview.AlignRight),
 		)
-	}
-}
-
-func (t *Tui) readContainerUpdated(ctx context.Context) {
-	for {
-		select {
-		case c := <-t.containerUpdated:
-			t.tableContainerDataLock.Lock()
-			t.tableContainerData[c.ID] = c
-			t.tableContainerDataLock.Unlock()
-
-			projectID := ProjectID(c.Project.ID)
-
-			t.tableProjectDataLock.RLock()
-			project, projectExist := t.tableProjectData[projectID]
-			t.tableProjectDataLock.Unlock()
-
-			if !projectExist {
-				project = Project{
-					ID:               projectID,
-					Name:             c.Project.Name,
-					ContainersCPU:    make(map[dto.ContainerID]float64),
-					ContainersMemory: make(map[dto.ContainerID]float64),
-					ContainersState:  make(map[dto.ContainerID]bool),
-				}
-			}
-
-			project.CPUPercentage += c.CPUPercentage - project.ContainersCPU[c.ID]
-			project.ContainersCPU[c.ID] = c.CPUPercentage
-
-			project.MemoryUsagePercentage += c.MemoryUsagePercentage - project.ContainersMemory[c.ID]
-			project.ContainersMemory[c.ID] = c.MemoryUsagePercentage
-
-			isRunning := 0
-			if c.IsRunning {
-				isRunning = 1
-			}
-
-			previousRunning := 0
-			if project.ContainersState[c.ID] {
-				previousRunning = 1
-			}
-
-			project.ContainersRunning += isRunning - previousRunning
-			project.ContainersState[c.ID] = c.IsRunning
-
-			t.tableProjectDataLock.Lock()
-			t.tableProjectData[projectID] = project
-			t.tableProjectDataLock.Unlock()
-
-			t.app.QueueUpdateDraw(func() {
-				t.drawContainers()
-				t.drawProjects()
-			})
-
-		case <-ctx.Done():
-			t.logger.DebugContext(ctx, "readContainerUpdated context is done")
-			return
-		}
 	}
 }
 

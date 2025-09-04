@@ -9,22 +9,7 @@ import (
 	"github.com/syrm/c8s/dto"
 )
 
-type ContainerValueType int
-
-const (
-	ContainerValueCPU ContainerValueType = iota
-	ContainerValueMemory
-	ContainerValueState
-)
-
 type ContainerID string
-
-type ContainerValue struct {
-	ID        ContainerID
-	Type      ContainerValueType
-	Value     float64
-	IsRunning bool
-}
 
 type Container struct {
 	ID               ContainerID
@@ -33,8 +18,7 @@ type Container struct {
 	CPUPercentage    float64
 	MemoryPercentage float64
 	IsRunning        bool
-	Deleted          bool
-	containerUpdated chan<- dto.Container
+	containerUpdated chan<- dto.ContainerDeletable
 	Project          dto.Project
 	logger           *slog.Logger
 }
@@ -42,7 +26,7 @@ type Container struct {
 func NewContainer(
 	dockerContainer apiContainer.Summary,
 	project dto.Project,
-	containerUpdated chan<- dto.Container,
+	containerUpdated chan<- dto.ContainerDeletable,
 	logger *slog.Logger,
 ) *Container {
 	c := &Container{
@@ -140,9 +124,23 @@ func (c *Container) tryPublish() {
 		CPUPercentage:         c.CPUPercentage,
 		MemoryUsagePercentage: c.MemoryPercentage,
 		IsRunning:             c.IsRunning,
-		Deleted:               c.Deleted,
 	}:
 	default:
 		c.logger.Warn("dropped container publish", "container", c.ID)
+	}
+}
+
+// non-blocking publish; drops if no reader
+func (c *Container) tryUnpublish() {
+	if c.containerUpdated == nil {
+		return
+	}
+
+	select {
+	case c.containerUpdated <- dto.ContainerDeleted{
+		ID: dto.ContainerID(c.ID),
+	}:
+	default:
+		c.logger.Warn("dropped container unpublish", "container", c.ID)
 	}
 }
