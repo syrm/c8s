@@ -70,6 +70,10 @@ func (c *Container) handleCommands(ctx context.Context) {
 	}
 }
 
+func (c *Container) Delete() {
+	c.cancel()
+}
+
 func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
 	c.IsRunning = containerState == apiContainer.StateRunning
 	c.tryPublish()

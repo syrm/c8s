@@ -132,8 +132,9 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		d.containersCommand <- ContainersCommand{
 			functor: func(d *Docker) *Container {
 				delete(d.containers, c.ID)
+				c.Delete()
 
-				return c
+				return nil
 			},
 		}
 
@@ -224,6 +225,7 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					d.containersCommand <- ContainersCommand{
 						functor: func(d *Docker) *Container {
 							delete(d.containers, c.ID)
+							c.Delete()
 
 							return nil
 						},
