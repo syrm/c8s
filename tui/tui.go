@@ -108,6 +108,7 @@ func (t *Tui) readContainerUpdated(ctx context.Context) {
 	draw := 0
 
 	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
