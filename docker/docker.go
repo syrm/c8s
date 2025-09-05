@@ -100,7 +100,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	response := make(chan *Container)
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
-			return d.containers[ContainerID(dockerContainer.ID)]
+			return docker.containers[ContainerID(dockerContainer.ID)]
 		},
 		response: response,
 	}
@@ -115,7 +115,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
-			d.containers[c.ID] = c
+			docker.containers[c.ID] = c
 
 			return nil
 		},
@@ -130,8 +130,8 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 
 		d.containersCommand <- ContainersCommand{
-			functor: func(d *Docker) *Container {
-				delete(d.containers, c.ID)
+			functor: func(docker *Docker) *Container {
+				delete(docker.containers, c.ID)
 				c.Delete()
 
 				return nil
@@ -207,7 +207,7 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			response := make(chan *Container)
 			d.containersCommand <- ContainersCommand{
 				functor: func(docker *Docker) *Container {
-					return d.containers[ContainerID(msg.Actor.ID)]
+					return docker.containers[ContainerID(msg.Actor.ID)]
 				},
 				response: response,
 			}
@@ -223,8 +223,8 @@ func (d *Docker) handleEvents(ctx context.Context) {
 
 				if msg.Action == events.ActionDestroy {
 					d.containersCommand <- ContainersCommand{
-						functor: func(d *Docker) *Container {
-							delete(d.containers, c.ID)
+						functor: func(docker *Docker) *Container {
+							delete(docker.containers, c.ID)
 							c.Delete()
 
 							return nil
