@@ -21,15 +21,14 @@ import (
 
 type Docker struct {
 	client           *dockerClient.Client
-	projectUpdated   chan<- dto.Project
-	projects         map[ProjectID]*Project
-	containerUpdated chan<- dto.Container
+	containerUpdated chan<- dto.ContainerDeletable
 	containers       map[ContainerID]*Container
 	containersLock   sync.RWMutex
+	newContainer     chan apiContainer.Summary
 	logger           *slog.Logger
 }
 
-func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, containerUpdated chan<- dto.Container, logger *slog.Logger) *Docker {
+func NewDocker(ctx context.Context, containerUpdated chan<- dto.ContainerDeletable, logger *slog.Logger) *Docker {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))
@@ -38,10 +37,9 @@ func NewDocker(ctx context.Context, projectUpdated chan<- dto.Project, container
 
 	return &Docker{
 		client:           cli,
-		projectUpdated:   projectUpdated,
-		projects:         make(map[ProjectID]*Project),
 		containerUpdated: containerUpdated,
-		containers:       make(map[ContainerID]*Container),
+		containers:       make(map[ContainerID]*Container, 256),
+		newContainer:     make(chan apiContainer.Summary, 256),
 		logger:           logger,
 	}
 }
@@ -50,12 +48,16 @@ func (d *Docker) Run(ctx context.Context) {
 	eg, errCtx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
+		d.handleEvents(errCtx)
+		return nil
+	})
+
+	eg.Go(func() error {
 		return d.collectContainers(errCtx)
 	})
 
 	eg.Go(func() error {
-		d.handleEvents(errCtx)
-		return nil
+		return d.handleContainerStats(errCtx)
 	})
 
 	if err := eg.Wait(); err != nil {
@@ -71,49 +73,51 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 
 	d.logger.DebugContext(ctx, "CollectContainers started")
 
-	var wg sync.WaitGroup
 	for _, dockerContainer := range dockerContainers {
-		projectIDraw, isProject := dockerContainer.Labels["com.docker.compose.project.working_dir"]
-
-		if !isProject {
-			continue
-		}
-		projectID := ProjectID(projectIDraw)
-
-		if _, ok := d.projects[projectID]; !ok {
-			d.projects[projectID] = NewProject(
-				projectID,
-				dockerContainer.Labels["com.docker.compose.project"],
-				d.projectUpdated,
-				make(chan ContainerValue, 256),
-				d.logger,
-			)
-
-			go d.projects[projectID].HandleContainerValue(ctx)
-		}
-
-		c := NewContainer(dockerContainer, projectID, d.projects[projectID].GetUpdatedContainerValue(), d.containerUpdated, d.logger)
-		d.containersLock.Lock()
-		d.containers[c.ID] = c
-		d.containersLock.Unlock()
-		d.projects[projectID].Containers = append(d.projects[projectID].Containers, c)
-
-		wg.Go(func() {
-			d.getContainerStats(ctx, c)
-		})
+		d.newContainer <- dockerContainer
 	}
-
-	wg.Wait()
 
 	d.logger.DebugContext(ctx, "CollectContainers is done")
 
 	return nil
 }
 
-func (d *Docker) getContainerStats(ctx context.Context, c *Container) {
+func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContainer.Summary) {
+	projectIDraw, isProject := dockerContainer.Labels["com.docker.compose.project.working_dir"]
+
+	if !isProject {
+		return
+	}
+
+	project := dto.Project{
+		ID:   dto.ProjectID(projectIDraw),
+		Name: dockerContainer.Labels["com.docker.compose.project"],
+	}
+
+	d.containersLock.Lock()
+	// Check if container was already created by another event
+	if _, exists := d.containers[ContainerID(dockerContainer.ID)]; exists {
+		d.containersLock.Unlock()
+		return
+	}
+	c := NewContainer(dockerContainer, project, d.containerUpdated, d.logger)
+	d.containers[c.ID] = c
+	d.containersLock.Unlock()
+
+	go d.getContainerStatsRealtime(ctx, c)
+}
+
+func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 	dockerContainerStats, err := d.client.ContainerStats(ctx, string(c.ID), true)
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+
+		d.containersLock.Lock()
+		delete(d.containers, c.ID)
+		d.containersLock.Unlock()
+
+		c.tryUnpublish()
+
 		return
 	}
 
@@ -138,6 +142,18 @@ func (d *Docker) getContainerStats(ctx context.Context, c *Container) {
 	}
 }
 
+func (d *Docker) handleContainerStats(ctx context.Context) error {
+	for {
+		select {
+		case dockerContainer := <-d.newContainer:
+			d.createContainer(ctx, dockerContainer)
+		case <-ctx.Done():
+			d.logger.DebugContext(ctx, "handleContainerStats context is done")
+			return nil
+		}
+	}
+}
+
 func (d *Docker) handleEvents(ctx context.Context) {
 	f := filters.NewArgs()
 	f.Add("type", "container")
@@ -153,11 +169,32 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			c, ok := d.containers[ContainerID(msg.Actor.ID)]
 			d.containersLock.RUnlock()
 
-			if !ok {
+			if ok {
+				c.SetRunningStateFromAction(msg.Action)
+
+				if msg.Action == events.ActionDestroy {
+					d.containersLock.Lock()
+					delete(d.containers, ContainerID(msg.Actor.ID))
+					d.containersLock.Unlock()
+
+					c.tryUnpublish()
+				}
 				continue
 			}
 
-			c.SetRunningStateFromAction(msg.Action)
+			state := apiContainer.StateExited
+
+			if IsRunningFromAction(msg.Action) {
+				state = apiContainer.StateRunning
+			}
+
+			d.createContainer(ctx, apiContainer.Summary{
+				ID:     msg.Actor.ID,
+				Names:  []string{msg.Actor.Attributes["name"]},
+				Labels: msg.Actor.Attributes,
+				State:  state,
+			})
+
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "handleEvents context is done")
 			return

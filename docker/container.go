@@ -9,22 +9,7 @@ import (
 	"github.com/syrm/c8s/dto"
 )
 
-type ContainerValueType int
-
-const (
-	ContainerValueCPU ContainerValueType = iota
-	ContainerValueMemory
-	ContainerValueState
-)
-
 type ContainerID string
-
-type ContainerValue struct {
-	ID        ContainerID
-	Type      ContainerValueType
-	Value     float64
-	IsRunning bool
-}
 
 type Container struct {
 	ID               ContainerID
@@ -33,25 +18,22 @@ type Container struct {
 	CPUPercentage    float64
 	MemoryPercentage float64
 	IsRunning        bool
-	valueUpdated     chan<- ContainerValue
-	containerUpdated chan<- dto.Container
-	ProjectID        ProjectID
+	containerUpdated chan<- dto.ContainerDeletable
+	Project          dto.Project
 	logger           *slog.Logger
 }
 
 func NewContainer(
 	dockerContainer apiContainer.Summary,
-	projectID ProjectID,
-	valueUpdated chan<- ContainerValue,
-	containerUpdated chan<- dto.Container,
+	project dto.Project,
+	containerUpdated chan<- dto.ContainerDeletable,
 	logger *slog.Logger,
 ) *Container {
 	c := &Container{
 		ID:               ContainerID(dockerContainer.ID),
 		Service:          dockerContainer.Labels["com.docker.compose.service"],
 		Name:             dockerContainer.Names[0],
-		ProjectID:        projectID,
-		valueUpdated:     valueUpdated,
+		Project:          project,
 		containerUpdated: containerUpdated,
 		logger:           logger,
 	}
@@ -62,31 +44,27 @@ func NewContainer(
 
 func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
 	c.IsRunning = containerState == apiContainer.StateRunning
-	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning})
+	c.tryPublish()
 }
 
 func (c *Container) SetRunningStateFromAction(action events.Action) {
-	c.IsRunning = action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload
-	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueState, IsRunning: c.IsRunning})
+	c.IsRunning = IsRunningFromAction(action)
+	c.tryPublish()
+}
+
+func IsRunningFromAction(action events.Action) bool {
+	return action == events.ActionCreate || action == events.ActionStart || action == events.ActionUnPause || action == events.ActionRestart || action == events.ActionReload || action == events.ActionExecStart || action == events.ActionExecDie || action == events.ActionExecCreate || action == events.ActionExecDetach
 }
 
 func (c *Container) Update(stats apiContainer.StatsResponse) {
 	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)
 	c.updateMemoryPercentage(stats.MemoryStats)
-	c.containerUpdated <- dto.Container{
-		ID:                    dto.ContainerID(c.ID),
-		ProjectID:             dto.ProjectID(c.ProjectID),
-		Service:               c.Service,
-		Name:                  c.Name,
-		CPUPercentage:         c.CPUPercentage,
-		MemoryUsagePercentage: c.MemoryPercentage,
-	}
+	c.tryPublish()
 }
 
 func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
 	memUsage := c.calculateMemUsageUnixNoCache(memoryStats)
 	c.MemoryPercentage = c.calculateMemPercentUnixNoCache(float64(memoryStats.Limit), memUsage)
-	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueMemory, Value: c.MemoryPercentage})
 }
 
 func (c *Container) calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) float64 {
@@ -129,18 +107,40 @@ func (c *Container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats
 	}
 
 	c.CPUPercentage = cpuPercent
-	c.tryPublishValue(ContainerValue{ID: c.ID, Type: ContainerValueCPU, Value: c.CPUPercentage})
 }
 
 // non-blocking publish; drops if no reader
-func (c *Container) tryPublishValue(v ContainerValue) {
-	if c.valueUpdated == nil {
+func (c *Container) tryPublish() {
+	if c.containerUpdated == nil {
 		return
 	}
 
 	select {
-	case c.valueUpdated <- v:
+	case c.containerUpdated <- dto.Container{
+		ID:                    dto.ContainerID(c.ID),
+		Project:               c.Project,
+		Service:               c.Service,
+		Name:                  c.Name,
+		CPUPercentage:         c.CPUPercentage,
+		MemoryUsagePercentage: c.MemoryPercentage,
+		IsRunning:             c.IsRunning,
+	}:
 	default:
-		c.logger.Warn("dropped container value update", "container", c.ID, "type", v.Type)
+		c.logger.Warn("dropped container publish", "container", c.ID)
+	}
+}
+
+// non-blocking publish; drops if no reader
+func (c *Container) tryUnpublish() {
+	if c.containerUpdated == nil {
+		return
+	}
+
+	select {
+	case c.containerUpdated <- dto.ContainerDeleted{
+		ID: dto.ContainerID(c.ID),
+	}:
+	default:
+		c.logger.Warn("dropped container unpublish", "container", c.ID)
 	}
 }
