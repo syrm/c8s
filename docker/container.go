@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"log/slog"
 
 	apiContainer "github.com/docker/docker/api/types/container"
@@ -19,27 +20,58 @@ type Container struct {
 	MemoryPercentage float64
 	IsRunning        bool
 	containerUpdated chan<- dto.ContainerDeletable
+	Command          chan ContainerCommand
 	Project          dto.Project
+	cancel           context.CancelFunc
 	logger           *slog.Logger
 }
 
+type ContainerCommand struct {
+	functor func(*Container)
+}
+
 func NewContainer(
+	ctx context.Context,
 	dockerContainer apiContainer.Summary,
 	project dto.Project,
 	containerUpdated chan<- dto.ContainerDeletable,
 	logger *slog.Logger,
 ) *Container {
+	ctx, cancel := context.WithCancel(ctx)
+
 	c := &Container{
 		ID:               ContainerID(dockerContainer.ID),
 		Service:          dockerContainer.Labels["com.docker.compose.service"],
 		Name:             dockerContainer.Names[0],
+		Command:          make(chan ContainerCommand),
 		Project:          project,
 		containerUpdated: containerUpdated,
+		cancel:           cancel,
 		logger:           logger,
 	}
 
 	c.setRunningStateFromState(dockerContainer.State)
+
+	go c.handleCommands(ctx)
+
 	return c
+}
+
+func (c *Container) handleCommands(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case cmd := <-c.Command:
+			if cmd.functor != nil {
+				cmd.functor(c)
+			}
+		}
+	}
+}
+
+func (c *Container) Delete() {
+	c.cancel()
 }
 
 func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
