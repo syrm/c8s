@@ -164,9 +164,10 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 			break
 		}
 
+		s := stats
 		c.Command <- ContainerCommand{
 			functor: func(container *Container) {
-				container.Update(stats)
+				container.Update(s)
 			},
 		}
 	}
