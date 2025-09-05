@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -19,13 +18,17 @@ import (
 	"github.com/syrm/c8s/dto"
 )
 
+type ContainersCommand struct {
+	functor  func(*Docker) *Container
+	response chan *Container
+}
+
 type Docker struct {
-	client           *dockerClient.Client
-	containerUpdated chan<- dto.ContainerDeletable
-	containers       map[ContainerID]*Container
-	containersLock   sync.RWMutex
-	newContainer     chan apiContainer.Summary
-	logger           *slog.Logger
+	client            *dockerClient.Client
+	containerUpdated  chan<- dto.ContainerDeletable
+	containers        map[ContainerID]*Container
+	containersCommand chan ContainersCommand
+	logger            *slog.Logger
 }
 
 func NewDocker(ctx context.Context, containerUpdated chan<- dto.ContainerDeletable, logger *slog.Logger) *Docker {
@@ -36,16 +39,20 @@ func NewDocker(ctx context.Context, containerUpdated chan<- dto.ContainerDeletab
 	}
 
 	return &Docker{
-		client:           cli,
-		containerUpdated: containerUpdated,
-		containers:       make(map[ContainerID]*Container, 256),
-		newContainer:     make(chan apiContainer.Summary, 256),
-		logger:           logger,
+		client:            cli,
+		containerUpdated:  containerUpdated,
+		containers:        make(map[ContainerID]*Container, 256),
+		containersCommand: make(chan ContainersCommand),
+		logger:            logger,
 	}
 }
 
 func (d *Docker) Run(ctx context.Context) {
 	eg, errCtx := errgroup.WithContext(ctx)
+
+	eg.Go(func() error {
+		return d.handleContainersCommand(errCtx)
+	})
 
 	eg.Go(func() error {
 		d.handleEvents(errCtx)
@@ -54,10 +61,6 @@ func (d *Docker) Run(ctx context.Context) {
 
 	eg.Go(func() error {
 		return d.collectContainers(errCtx)
-	})
-
-	eg.Go(func() error {
-		return d.handleContainerStats(errCtx)
 	})
 
 	if err := eg.Wait(); err != nil {
@@ -74,7 +77,7 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 	d.logger.DebugContext(ctx, "CollectContainers started")
 
 	for _, dockerContainer := range dockerContainers {
-		d.newContainer <- dockerContainer
+		d.createContainer(ctx, dockerContainer)
 	}
 
 	d.logger.DebugContext(ctx, "CollectContainers is done")
@@ -94,15 +97,29 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		Name: dockerContainer.Labels["com.docker.compose.project"],
 	}
 
-	d.containersLock.Lock()
-	// Check if container was already created by another event
-	if _, exists := d.containers[ContainerID(dockerContainer.ID)]; exists {
-		d.containersLock.Unlock()
+	response := make(chan *Container)
+	d.containersCommand <- ContainersCommand{
+		functor: func(docker *Docker) *Container {
+			return d.containers[ContainerID(dockerContainer.ID)]
+		},
+		response: response,
+	}
+
+	c := <-response
+	if c != nil {
+		// Container already exists
 		return
 	}
-	c := NewContainer(dockerContainer, project, d.containerUpdated, d.logger)
-	d.containers[c.ID] = c
-	d.containersLock.Unlock()
+
+	c = NewContainer(ctx, dockerContainer, project, d.containerUpdated, d.logger)
+
+	d.containersCommand <- ContainersCommand{
+		functor: func(docker *Docker) *Container {
+			d.containers[c.ID] = c
+
+			return nil
+		},
+	}
 
 	go d.getContainerStatsRealtime(ctx, c)
 }
@@ -112,11 +129,19 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 
-		d.containersLock.Lock()
-		delete(d.containers, c.ID)
-		d.containersLock.Unlock()
+		d.containersCommand <- ContainersCommand{
+			functor: func(d *Docker) *Container {
+				delete(d.containers, c.ID)
 
-		c.tryUnpublish()
+				return c
+			},
+		}
+
+		c.Command <- ContainerCommand{
+			functor: func(container *Container) {
+				container.tryUnpublish()
+			},
+		}
 
 		return
 	}
@@ -138,19 +163,31 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 			break
 		}
 
-		c.Update(stats)
+		c.Command <- ContainerCommand{
+			functor: func(container *Container) {
+				container.Update(stats)
+			},
+		}
 	}
 }
 
-func (d *Docker) handleContainerStats(ctx context.Context) error {
+func (d *Docker) handleContainersCommand(ctx context.Context) error {
 	for {
 		select {
-		case dockerContainer := <-d.newContainer:
-			d.createContainer(ctx, dockerContainer)
+		case cmd := <-d.containersCommand:
+			var c *Container
+			if cmd.functor != nil {
+				c = cmd.functor(d)
+			}
+
+			if cmd.response != nil {
+				cmd.response <- c
+			}
 		case <-ctx.Done():
-			d.logger.DebugContext(ctx, "handleContainerStats context is done")
+			d.logger.DebugContext(ctx, "handleContainersCommand context is done")
 			return nil
 		}
+
 	}
 }
 
@@ -165,19 +202,37 @@ func (d *Docker) handleEvents(ctx context.Context) {
 		select {
 		case msg := <-msgs:
 			d.logger.DebugContext(ctx, "event", slog.String("action", string(msg.Action)), slog.String("container_id", msg.Actor.ID))
-			d.containersLock.RLock()
-			c, ok := d.containers[ContainerID(msg.Actor.ID)]
-			d.containersLock.RUnlock()
 
-			if ok {
-				c.SetRunningStateFromAction(msg.Action)
+			response := make(chan *Container)
+			d.containersCommand <- ContainersCommand{
+				functor: func(docker *Docker) *Container {
+					return d.containers[ContainerID(msg.Actor.ID)]
+				},
+				response: response,
+			}
 
+			c := <-response
+			c.Command <- ContainerCommand{
+				functor: func(container *Container) {
+					container.SetRunningStateFromAction(msg.Action)
+				},
+			}
+
+			if c != nil {
 				if msg.Action == events.ActionDestroy {
-					d.containersLock.Lock()
-					delete(d.containers, ContainerID(msg.Actor.ID))
-					d.containersLock.Unlock()
+					d.containersCommand <- ContainersCommand{
+						functor: func(d *Docker) *Container {
+							delete(d.containers, c.ID)
 
-					c.tryUnpublish()
+							return nil
+						},
+					}
+
+					c.Command <- ContainerCommand{
+						functor: func(container *Container) {
+							container.tryUnpublish()
+						},
+					}
 				}
 				continue
 			}
