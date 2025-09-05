@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -104,8 +105,17 @@ func (t *Tui) GetContainerUpdated() chan<- dto.ContainerDeletable {
 }
 
 func (t *Tui) readContainerUpdated(ctx context.Context) {
+	draw := 0
+
+	ticker := time.NewTicker(2 * time.Second)
+
 	for {
 		select {
+		case <-ticker.C:
+			t.app.QueueUpdateDraw(func() {
+				t.drawContainers()
+				t.drawProjects()
+			})
 		case c := <-t.containerUpdated:
 			switch c := c.(type) {
 			case dto.ContainerDeleted:
@@ -179,10 +189,13 @@ func (t *Tui) readContainerUpdated(ctx context.Context) {
 				t.tableProjectData[projectID] = project
 				t.tableProjectDataLock.Unlock()
 
-				t.app.QueueUpdateDraw(func() {
-					t.drawContainers()
-					t.drawProjects()
-				})
+				if draw < 20 {
+					t.app.QueueUpdateDraw(func() {
+						t.drawContainers()
+						t.drawProjects()
+					})
+					draw += 1
+				}
 			}
 		case <-ctx.Done():
 			t.logger.DebugContext(ctx, "readContainerUpdated context is done")

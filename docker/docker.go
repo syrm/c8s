@@ -233,7 +233,6 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					d.containersCommand <- ContainersCommand{
 						functor: func(docker *Docker) *Container {
 							delete(docker.containers, c.ID)
-							c.Delete()
 
 							return nil
 						},
@@ -242,6 +241,7 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					c.Command <- ContainerCommand{
 						functor: func(container *Container) {
 							container.tryUnpublish()
+							c.Delete()
 						},
 					}
 				}
