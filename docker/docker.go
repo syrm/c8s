@@ -212,13 +212,14 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			}
 
 			c := <-response
-			c.Command <- ContainerCommand{
-				functor: func(container *Container) {
-					container.SetRunningStateFromAction(msg.Action)
-				},
-			}
 
 			if c != nil {
+				c.Command <- ContainerCommand{
+					functor: func(container *Container) {
+						container.SetRunningStateFromAction(msg.Action)
+					},
+				}
+
 				if msg.Action == events.ActionDestroy {
 					d.containersCommand <- ContainersCommand{
 						functor: func(d *Docker) *Container {
