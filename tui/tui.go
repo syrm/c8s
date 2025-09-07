@@ -11,23 +11,48 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
-
 	"github.com/syrm/c8s/dto"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
+
+type currentView int
+
+const (
+	viewProjectList currentView = iota
+	viewProject
+)
+
+type RequestData interface {
+	isRequestData()
+}
+
+type RequestProjectList struct {
+	Response chan []dto.Project
+}
+
+func (p *RequestProjectList) isRequestData() {}
+
+type RequestProject struct {
+	ProjectID dto.ProjectID
+	Response  chan []dto.Container
+}
+
+func (p *RequestProject) isRequestData() {}
 
 type Tui struct {
 	app                    *tview.Application
 	tableProject           *tview.Table
-	tableProjectData       map[ProjectID]Project
+	tableProjectData       map[dto.ProjectID]dto.Project
 	tableProjectDataLock   sync.RWMutex
-	containerUpdated       chan dto.ContainerDeletable
 	tableContainer         *tview.Table
 	tableContainerData     map[dto.ContainerID]dto.Container
 	tableContainerDataLock sync.RWMutex
-	currentProjectID       ProjectID
+	currentView            currentView
+	currentViewLock        sync.RWMutex
+	currentIDTargeted      string
+	requestData            chan RequestData
 	logger                 *slog.Logger
 }
 
@@ -51,10 +76,11 @@ func NewTui(logger *slog.Logger) *Tui {
 		app:                app,
 		logger:             logger,
 		tableProject:       tableProject,
-		tableProjectData:   make(map[ProjectID]Project),
-		containerUpdated:   make(chan dto.ContainerDeletable, 256),
+		tableProjectData:   make(map[dto.ProjectID]dto.Project),
 		tableContainer:     tableContainer,
 		tableContainerData: make(map[dto.ContainerID]dto.Container),
+		requestData:        make(chan RequestData),
+		currentView:        viewProjectList,
 	}
 
 	tableProject.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -62,7 +88,10 @@ func NewTui(logger *slog.Logger) *Tui {
 			rowIndex, _ := tableProject.GetSelection()
 			for _, project := range tui.tableProjectData {
 				if project.Name == tableProject.GetCell(rowIndex, 0).Text {
-					tui.currentProjectID = project.ID
+					tui.currentIDTargeted = string(project.ID)
+					tui.currentViewLock.Lock()
+					tui.currentView = viewProject
+					tui.currentViewLock.Unlock()
 					break
 				}
 			}
@@ -77,6 +106,10 @@ func NewTui(logger *slog.Logger) *Tui {
 	tableContainer.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEsc || event.Key() == tcell.KeyLeft {
 			tui.app.SetRoot(tui.tableProject, true)
+			tui.currentViewLock.Lock()
+			tui.currentView = viewProjectList
+			tui.currentViewLock.Unlock()
+			tui.currentIDTargeted = ""
 		}
 
 		return event
@@ -100,115 +133,10 @@ func (t *Tui) RenderContainerHeader(project string) {
 	t.tableContainer.SetFixed(1, 0)
 }
 
-func (t *Tui) GetContainerUpdated() chan<- dto.ContainerDeletable {
-	return t.containerUpdated
-}
-
-func (t *Tui) readContainerUpdated(ctx context.Context) {
-	draw := 0
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			t.app.QueueUpdateDraw(func() {
-				t.drawContainers()
-				t.drawProjects()
-			})
-		case c := <-t.containerUpdated:
-			switch c := c.(type) {
-			case dto.ContainerDeleted:
-				t.tableContainerDataLock.Lock()
-				delete(t.tableContainerData, c.ID)
-				t.tableContainerDataLock.Unlock()
-
-				t.tableProjectDataLock.Lock()
-				for projectID, project := range t.tableProjectData {
-					if _, exists := project.ContainersCPU[c.ID]; exists {
-						project.CPUPercentage -= project.ContainersCPU[c.ID]
-						delete(project.ContainersCPU, c.ID)
-					}
-
-					if _, exists := project.ContainersMemory[c.ID]; exists {
-						project.MemoryUsagePercentage -= project.ContainersMemory[c.ID]
-						delete(project.ContainersMemory, c.ID)
-					}
-
-					if isRunning, exists := project.ContainersState[c.ID]; exists {
-						if isRunning {
-							project.ContainersRunning -= 1
-						}
-					}
-					delete(project.ContainersState, c.ID)
-
-					t.tableProjectData[projectID] = project
-				}
-				t.tableProjectDataLock.Unlock()
-			case dto.Container:
-				t.tableContainerDataLock.Lock()
-				t.tableContainerData[c.ID] = c
-				t.tableContainerDataLock.Unlock()
-
-				projectID := ProjectID(c.Project.ID)
-
-				t.tableProjectDataLock.RLock()
-				project, projectExist := t.tableProjectData[projectID]
-				t.tableProjectDataLock.RUnlock()
-
-				if !projectExist {
-					project = Project{
-						ID:               projectID,
-						Name:             c.Project.Name,
-						ContainersCPU:    make(map[dto.ContainerID]float64),
-						ContainersMemory: make(map[dto.ContainerID]float64),
-						ContainersState:  make(map[dto.ContainerID]bool),
-					}
-				}
-
-				project.CPUPercentage += c.CPUPercentage - project.ContainersCPU[c.ID]
-				project.ContainersCPU[c.ID] = c.CPUPercentage
-
-				project.MemoryUsagePercentage += c.MemoryUsagePercentage - project.ContainersMemory[c.ID]
-				project.ContainersMemory[c.ID] = c.MemoryUsagePercentage
-
-				isRunning := 0
-				if c.IsRunning {
-					isRunning = 1
-				}
-
-				previousRunning := 0
-				if project.ContainersState[c.ID] {
-					previousRunning = 1
-				}
-
-				project.ContainersRunning += isRunning - previousRunning
-				project.ContainersState[c.ID] = c.IsRunning
-
-				t.tableProjectDataLock.Lock()
-				t.tableProjectData[projectID] = project
-				t.tableProjectDataLock.Unlock()
-
-				if draw < 20 {
-					t.app.QueueUpdateDraw(func() {
-						t.drawContainers()
-						t.drawProjects()
-					})
-					draw += 1
-				}
-			}
-		case <-ctx.Done():
-			t.logger.DebugContext(ctx, "readContainerUpdated context is done")
-			return
-		}
-	}
-}
-
 func (t *Tui) drawProjects() {
 	projects := slices.Collect(maps.Values(t.tableProjectData))
 
-	slices.SortStableFunc(projects, func(a, b Project) int {
+	slices.SortStableFunc(projects, func(a, b dto.Project) int {
 		if a.CPUPercentage < b.CPUPercentage {
 			return 1
 		}
@@ -237,7 +165,7 @@ func (t *Tui) drawProjects() {
 			index+1+offset,
 			2,
 			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", max(0, project.MemoryUsagePercentage)),
+				fmt.Sprintf("%.2f%%", max(0, project.MemoryPercentage)),
 			).
 				SetAlign(tview.AlignRight),
 		)
@@ -269,11 +197,11 @@ func (t *Tui) drawContainers() {
 
 	t.tableContainer.Clear()
 	t.tableProjectDataLock.RLock()
-	t.RenderContainerHeader(t.tableProjectData[t.currentProjectID].Name)
+	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(t.currentIDTargeted)].Name)
 	t.tableProjectDataLock.RUnlock()
 	index := 0
 	for _, container := range containers {
-		if ProjectID(container.Project.ID) != t.currentProjectID {
+		if string(container.Project.ID) != t.currentIDTargeted {
 			continue
 		}
 		index += 1
@@ -291,15 +219,73 @@ func (t *Tui) drawContainers() {
 			index,
 			2,
 			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", container.MemoryUsagePercentage),
+				fmt.Sprintf("%.2f%%", container.MemoryPercentage),
 			).
 				SetAlign(tview.AlignRight),
 		)
 	}
 }
 
+func (t *Tui) GetRequestData() <-chan RequestData {
+	return t.requestData
+}
+
+func (t *Tui) getData(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			t.currentViewLock.RLock()
+			cv := t.currentView
+			t.currentViewLock.RUnlock()
+			switch cv {
+			case viewProjectList:
+				response := make(chan []dto.Project)
+				t.requestData <- &RequestProjectList{
+					Response: response,
+				}
+
+				projects := <-response
+				t.tableProjectDataLock.Lock()
+				t.tableProjectData = make(map[dto.ProjectID]dto.Project)
+				for _, p := range projects {
+					t.tableProjectData[p.ID] = p
+				}
+				t.tableProjectDataLock.Unlock()
+
+				t.app.QueueUpdateDraw(func() {
+					t.drawProjects()
+				})
+			case viewProject:
+				response := make(chan []dto.Container)
+				t.requestData <- &RequestProject{
+					ProjectID: dto.ProjectID(t.currentIDTargeted),
+					Response:  response,
+				}
+
+				containers := <-response
+				t.tableContainerDataLock.Lock()
+				t.tableContainerData = make(map[dto.ContainerID]dto.Container)
+				for _, c := range containers {
+					t.tableContainerData[c.ID] = c
+				}
+				t.tableContainerDataLock.Unlock()
+
+				t.app.QueueUpdateDraw(func() {
+					t.drawContainers()
+				})
+			}
+		}
+	}
+}
+
 func (t *Tui) Render(ctx context.Context) {
-	go t.readContainerUpdated(ctx)
+	go t.getData(ctx)
 
 	if err := t.app.SetRoot(t.tableProject, true).EnableMouse(true).Run(); err != nil {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
