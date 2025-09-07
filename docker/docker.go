@@ -126,7 +126,7 @@ func (d *Docker) handleRequestProject(r *tui.RequestProject) {
 	r.Response <- containers
 }
 
-func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) []dto.Project {
+func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			projects := make(map[dto.ProjectID]dto.Project)
@@ -174,8 +174,6 @@ func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) []dto.Proje
 			return nil
 		},
 	}
-
-	return nil
 }
 
 func (d *Docker) collectContainers(ctx context.Context) error {
