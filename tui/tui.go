@@ -86,6 +86,7 @@ func NewTui(logger *slog.Logger) *Tui {
 	tableProject.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyRight {
 			rowIndex, _ := tableProject.GetSelection()
+			tui.tableProjectDataLock.RLock()
 			for _, project := range tui.tableProjectData {
 				if project.Name == tableProject.GetCell(rowIndex, 0).Text {
 					tui.currentIDTargeted = string(project.ID)
@@ -95,6 +96,7 @@ func NewTui(logger *slog.Logger) *Tui {
 					break
 				}
 			}
+			tui.tableProjectDataLock.RUnlock()
 			tui.tableContainer.Clear()
 			tui.drawContainers()
 			tui.app.SetRoot(tui.tableContainer, true)
