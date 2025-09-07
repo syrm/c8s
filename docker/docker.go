@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 
 	"golang.org/x/sync/errgroup"
 
@@ -16,6 +18,7 @@ import (
 	dockerClient "github.com/docker/docker/client"
 
 	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/tui"
 )
 
 type ContainersCommand struct {
@@ -25,13 +28,17 @@ type ContainersCommand struct {
 
 type Docker struct {
 	client            *dockerClient.Client
-	containerUpdated  chan<- dto.ContainerDeletable
 	containers        map[ContainerID]*Container
 	containersCommand chan ContainersCommand
+	requestData       <-chan tui.RequestData
 	logger            *slog.Logger
 }
 
-func NewDocker(ctx context.Context, containerUpdated chan<- dto.ContainerDeletable, logger *slog.Logger) *Docker {
+func NewDocker(
+	ctx context.Context,
+	requestData <-chan tui.RequestData,
+	logger *slog.Logger,
+) *Docker {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))
@@ -40,9 +47,9 @@ func NewDocker(ctx context.Context, containerUpdated chan<- dto.ContainerDeletab
 
 	return &Docker{
 		client:            cli,
-		containerUpdated:  containerUpdated,
 		containers:        make(map[ContainerID]*Container, 256),
 		containersCommand: make(chan ContainersCommand),
+		requestData:       requestData,
 		logger:            logger,
 	}
 }
@@ -63,8 +70,110 @@ func (d *Docker) Run(ctx context.Context) {
 		return d.collectContainers(errCtx)
 	})
 
+	eg.Go(func() error {
+		d.handleRequests(errCtx)
+		return nil
+	})
+
 	if err := eg.Wait(); err != nil {
 		d.logger.ErrorContext(errCtx, "error in Docker Run", slog.Any("error", err))
+	}
+}
+
+func (d *Docker) handleRequests(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			d.logger.DebugContext(ctx, "handleRequests context is done")
+			return
+		case req := <-d.requestData:
+			switch r := req.(type) {
+
+			case *tui.RequestProject:
+				d.handleRequestProject(r)
+
+			case *tui.RequestProjectList:
+				d.handleRequestProjectList(r)
+			}
+		}
+	}
+}
+
+func (d *Docker) handleRequestProject(r *tui.RequestProject) {
+	var containers []dto.Container
+
+	for _, c := range d.containers {
+		if r.ProjectID == c.Project.ID {
+			response := make(chan ContainerResponse)
+			c.Command <- ContainerCommand{
+				response: response,
+			}
+
+			container := <-response
+
+			containers = append(containers, dto.Container{
+				ID:               dto.ContainerID(container.ID),
+				Project:          container.Project,
+				Service:          container.Service,
+				Name:             container.Name,
+				CPUPercentage:    container.CPUPercentage,
+				MemoryPercentage: container.MemoryPercentage,
+				IsRunning:        container.IsRunning,
+			})
+		}
+	}
+
+	r.Response <- containers
+}
+
+func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
+	d.containersCommand <- ContainersCommand{
+		functor: func(docker *Docker) *Container {
+			projects := make(map[dto.ProjectID]dto.Project)
+
+			for _, c := range d.containers {
+				response := make(chan ContainerResponse)
+				c.Command <- ContainerCommand{
+					response: response,
+				}
+
+				container := <-response
+
+				// We should copy the data to avoid data race
+				projectID := dto.ProjectID(container.Project.ID)
+
+				project, projectExist := projects[projectID]
+
+				if !projectExist {
+					project = dto.Project{
+						ID:               projectID,
+						Name:             container.Project.Name,
+						ContainersCPU:    make(map[dto.ContainerID]float64),
+						ContainersMemory: make(map[dto.ContainerID]float64),
+						ContainersState:  make(map[dto.ContainerID]bool),
+					}
+				}
+
+				project.CPUPercentage += container.CPUPercentage
+				project.ContainersCPU[dto.ContainerID(container.ID)] = container.CPUPercentage
+				project.MemoryPercentage += container.MemoryPercentage
+				project.ContainersMemory[dto.ContainerID(container.ID)] = container.MemoryPercentage
+
+				isRunning := 0
+				if container.IsRunning {
+					isRunning = 1
+				}
+
+				project.ContainersRunning += isRunning
+				project.ContainersState[dto.ContainerID(container.ID)] = container.IsRunning
+
+				projects[projectID] = project
+			}
+
+			r.Response <- slices.Collect(maps.Values(projects))
+
+			return nil
+		},
 	}
 }
 
@@ -92,7 +201,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		return
 	}
 
-	project := dto.Project{
+	project := dto.ContainerProject{
 		ID:   dto.ProjectID(projectIDraw),
 		Name: dockerContainer.Labels["com.docker.compose.project"],
 	}
@@ -111,7 +220,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		return
 	}
 
-	c = NewContainer(ctx, dockerContainer, project, d.containerUpdated, d.logger)
+	c = NewContainer(ctx, dockerContainer, project, d.logger)
 
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
@@ -138,12 +247,6 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 			},
 		}
 
-		c.Command <- ContainerCommand{
-			functor: func(container *Container) {
-				container.tryUnpublish()
-			},
-		}
-
 		return
 	}
 
@@ -153,14 +256,14 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 
 	for {
 		var stats apiContainer.StatsResponse
-		err := dec.Decode(&stats)
-		if err != nil {
-			if err != io.EOF && !errors.Is(err, context.DeadlineExceeded) {
-				d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+		errDecode := dec.Decode(&stats)
+		if errDecode != nil {
+			if errDecode != io.EOF && !errors.Is(errDecode, context.DeadlineExceeded) {
+				d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
 				break
 			}
 
-			d.logger.InfoContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+			d.logger.InfoContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
 			break
 		}
 
@@ -233,15 +336,9 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					d.containersCommand <- ContainersCommand{
 						functor: func(docker *Docker) *Container {
 							delete(docker.containers, c.ID)
+							c.Delete()
 
 							return nil
-						},
-					}
-
-					c.Command <- ContainerCommand{
-						functor: func(container *Container) {
-							container.tryUnpublish()
-							c.Delete()
 						},
 					}
 				}

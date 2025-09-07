@@ -25,7 +25,7 @@ func main() {
 
 	t := tui.NewTui(logger)
 
-	doc := docker.NewDocker(ctx, t.GetContainerUpdated(), logger)
+	doc := docker.NewDocker(ctx, t.GetRequestData(), logger)
 	go doc.Run(ctx)
 
 	t.Render(ctx)

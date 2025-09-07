@@ -7,13 +7,13 @@ type ContainerDeletable interface {
 }
 
 type Container struct {
-	ID                    ContainerID
-	Project               Project
-	Service               string
-	Name                  string
-	CPUPercentage         float64
-	MemoryUsagePercentage float64
-	IsRunning             bool
+	ID               ContainerID
+	Project          ContainerProject
+	Service          string
+	Name             string
+	CPUPercentage    float64
+	MemoryPercentage float64
+	IsRunning        bool
 }
 
 func (c Container) Deleted() bool {
@@ -26,4 +26,9 @@ type ContainerDeleted struct {
 
 func (c ContainerDeleted) Deleted() bool {
 	return true
+}
+
+type ContainerProject struct {
+	ID   ProjectID
+	Name string
 }
