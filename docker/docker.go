@@ -139,7 +139,8 @@ func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
 
 				container := <-response
 
-				projectID := container.Project.ID
+				// We should copy the data to avoid data race
+				projectID := dto.ProjectID(container.Project.ID)
 
 				project, projectExist := projects[projectID]
 
