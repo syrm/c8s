@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	apiContainer "github.com/docker/docker/api/types/container"
@@ -43,6 +44,7 @@ type ContainerCommand struct {
 func NewContainer(
 	ctx context.Context,
 	dockerContainer apiContainer.Summary,
+	action events.Action,
 	project dto.ContainerProject,
 	logger *slog.Logger,
 ) *Container {
@@ -58,7 +60,11 @@ func NewContainer(
 		logger:  logger,
 	}
 
-	c.setRunningStateFromState(dockerContainer.State)
+	isRunning, err := isRunningFromAction(action)
+
+	if err == nil {
+		c.IsRunning = isRunning
+	}
 
 	go c.handleCommands(ctx)
 
@@ -99,19 +105,36 @@ func (c *Container) setRunningStateFromState(containerState apiContainer.Contain
 }
 
 func (c *Container) SetRunningStateFromAction(action events.Action) {
-	c.IsRunning = IsRunningFromAction(action)
+	isRunning, err := isRunningFromAction(action)
+
+	if err != nil {
+		return
+	}
+
+	c.IsRunning = isRunning
 }
 
-func IsRunningFromAction(action events.Action) bool {
-	return action == events.ActionCreate ||
+func isRunningFromAction(action events.Action) (bool, error) {
+	if action == events.ActionCreate ||
 		action == events.ActionStart ||
 		action == events.ActionUnPause ||
 		action == events.ActionRestart ||
-		action == events.ActionReload ||
-		action == events.ActionExecStart ||
-		action == events.ActionExecDie ||
-		action == events.ActionExecCreate ||
-		action == events.ActionExecDetach
+		action == events.ActionReload {
+		return true, nil
+	}
+
+	if action == events.ActionDie ||
+		action == events.ActionStop ||
+		action == events.ActionPause ||
+		action == events.ActionKill ||
+		action == events.ActionOOM ||
+		action == events.ActionRemove ||
+		action == events.ActionDelete ||
+		action == events.ActionDestroy {
+		return false, nil
+	}
+
+	return true, errors.New("invalid action")
 }
 
 func (c *Container) Update(stats apiContainer.StatsResponse) {

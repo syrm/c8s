@@ -90,7 +90,7 @@ func (d *Docker) handleRequests(ctx context.Context) {
 			switch r := req.(type) {
 
 			case *tui.RequestProject:
-				d.handleRequestProject(r)
+				d.handleRequestContainerProject(r)
 
 			case *tui.RequestProjectList:
 				d.handleRequestProjectList(r)
@@ -99,31 +99,37 @@ func (d *Docker) handleRequests(ctx context.Context) {
 	}
 }
 
-func (d *Docker) handleRequestProject(r *tui.RequestProject) {
+func (d *Docker) handleRequestContainerProject(r *tui.RequestProject) {
 	var containers []dto.Container
 
-	for _, c := range d.containers {
-		if r.ProjectID == c.Project.ID {
-			response := make(chan ContainerResponse)
-			c.Command <- ContainerCommand{
-				response: response,
+	d.containersCommand <- ContainersCommand{
+		functor: func(docker *Docker) *Container {
+			for _, c := range docker.containers {
+				if r.ProjectID == c.Project.ID {
+					response := make(chan ContainerResponse)
+					c.Command <- ContainerCommand{
+						response: response,
+					}
+
+					container := <-response
+
+					containers = append(containers, dto.Container{
+						ID:               dto.ContainerID(container.ID),
+						Project:          container.Project,
+						Service:          container.Service,
+						Name:             container.Name,
+						CPUPercentage:    container.CPUPercentage,
+						MemoryPercentage: container.MemoryPercentage,
+						IsRunning:        container.IsRunning,
+					})
+				}
 			}
 
-			container := <-response
+			r.Response <- containers
 
-			containers = append(containers, dto.Container{
-				ID:               dto.ContainerID(container.ID),
-				Project:          container.Project,
-				Service:          container.Service,
-				Name:             container.Name,
-				CPUPercentage:    container.CPUPercentage,
-				MemoryPercentage: container.MemoryPercentage,
-				IsRunning:        container.IsRunning,
-			})
-		}
+			return nil
+		},
 	}
-
-	r.Response <- containers
 }
 
 func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
@@ -186,7 +192,7 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 	d.logger.DebugContext(ctx, "CollectContainers started")
 
 	for _, dockerContainer := range dockerContainers {
-		d.createContainer(ctx, dockerContainer)
+		d.createContainer(ctx, dockerContainer, events.ActionCreate)
 	}
 
 	d.logger.DebugContext(ctx, "CollectContainers is done")
@@ -194,7 +200,7 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 	return nil
 }
 
-func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContainer.Summary) {
+func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContainer.Summary, action events.Action) {
 	projectIDraw, isProject := dockerContainer.Labels["com.docker.compose.project.working_dir"]
 
 	if !isProject {
@@ -220,7 +226,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		return
 	}
 
-	c = NewContainer(ctx, dockerContainer, project, d.logger)
+	c = NewContainer(ctx, dockerContainer, action, project, d.logger)
 
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
@@ -345,18 +351,15 @@ func (d *Docker) handleEvents(ctx context.Context) {
 				continue
 			}
 
-			state := apiContainer.StateExited
-
-			if IsRunningFromAction(msg.Action) {
-				state = apiContainer.StateRunning
-			}
-
-			d.createContainer(ctx, apiContainer.Summary{
-				ID:     msg.Actor.ID,
-				Names:  []string{msg.Actor.Attributes["name"]},
-				Labels: msg.Actor.Attributes,
-				State:  state,
-			})
+			d.createContainer(
+				ctx,
+				apiContainer.Summary{
+					ID:     msg.Actor.ID,
+					Names:  []string{msg.Actor.Attributes["name"]},
+					Labels: msg.Actor.Attributes,
+				},
+				msg.Action,
+			)
 
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "handleEvents context is done")
