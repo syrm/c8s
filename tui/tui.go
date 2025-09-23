@@ -22,6 +22,7 @@ type currentView int
 const (
 	viewProjectList currentView = iota
 	viewProject
+	viewContainerLog
 )
 
 type RequestData interface {
@@ -33,6 +34,13 @@ type RequestProjectList struct {
 }
 
 func (p *RequestProjectList) isRequestData() {}
+
+type RequestContainerLog struct {
+	ContainerID dto.ContainerID
+	Response    chan dto.Container
+}
+
+func (p *RequestContainerLog) isRequestData() {}
 
 type RequestProject struct {
 	ProjectID dto.ProjectID
@@ -49,6 +57,8 @@ type Tui struct {
 	tableContainer         *tview.Table
 	tableContainerData     map[dto.ContainerID]dto.Container
 	tableContainerDataLock sync.RWMutex
+	tableContainerLog      *tview.TextView
+	tableContainerLogData  []string
 	currentView            currentView
 	currentViewLock        sync.RWMutex
 	currentIDTargeted      string
@@ -72,6 +82,8 @@ func NewTui(logger *slog.Logger) *Tui {
 	tableContainer := tview.NewTable().SetSelectable(true, false)
 	tableContainer.SetBorder(true)
 
+	tableContainerLog := tview.NewTextView()
+
 	tui := &Tui{
 		app:                app,
 		logger:             logger,
@@ -79,6 +91,7 @@ func NewTui(logger *slog.Logger) *Tui {
 		tableProjectData:   make(map[dto.ProjectID]dto.Project),
 		tableContainer:     tableContainer,
 		tableContainerData: make(map[dto.ContainerID]dto.Container),
+		tableContainerLog:  tableContainerLog,
 		requestData:        make(chan RequestData),
 		currentView:        viewProjectList,
 	}
@@ -112,6 +125,22 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.currentView = viewProjectList
 			tui.currentViewLock.Unlock()
 			tui.currentIDTargeted = ""
+		}
+
+		if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyRight {
+			rowIndex, _ := tableContainer.GetSelection()
+			tui.tableContainerDataLock.RLock()
+			for _, container := range tui.tableContainerData {
+				if container.Service == tableContainer.GetCell(rowIndex, 0).Text {
+					tui.currentIDTargeted = string(container.ID)
+					break
+				}
+			}
+			tui.tableContainerDataLock.RUnlock()
+			tui.app.SetRoot(tui.tableContainerLog, true)
+			tui.currentViewLock.Lock()
+			tui.currentView = viewContainerLog
+			tui.currentViewLock.Unlock()
 		}
 
 		return event
@@ -228,6 +257,11 @@ func (t *Tui) drawContainers() {
 	}
 }
 
+func (t *Tui) drawContainerLog() {
+	t.tableContainerLog.Clear()
+	t.tableContainerLog.SetText(strings.Join(t.tableContainerLogData, "\n"))
+}
+
 func (t *Tui) GetRequestData() <-chan RequestData {
 	return t.requestData
 }
@@ -235,6 +269,8 @@ func (t *Tui) GetRequestData() <-chan RequestData {
 func (t *Tui) getData(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+
+	var ctxCancel context.CancelFunc
 
 	for {
 		select {
@@ -247,6 +283,11 @@ func (t *Tui) getData(ctx context.Context) {
 			t.currentViewLock.RUnlock()
 			switch cv {
 			case viewProjectList:
+				if ctxCancel != nil {
+					ctxCancel()
+					ctxCancel = nil
+				}
+
 				response := make(chan []dto.Project)
 				t.requestData <- &RequestProjectList{
 					Response: response,
@@ -264,6 +305,11 @@ func (t *Tui) getData(ctx context.Context) {
 					t.drawProjects()
 				})
 			case viewProject:
+				if ctxCancel != nil {
+					ctxCancel()
+					ctxCancel = nil
+				}
+
 				response := make(chan []dto.Container)
 				t.requestData <- &RequestProject{
 					ProjectID: dto.ProjectID(t.currentIDTargeted),
@@ -277,6 +323,21 @@ func (t *Tui) getData(ctx context.Context) {
 					t.tableContainerData[c.ID] = c
 				}
 				t.tableContainerDataLock.Unlock()
+
+				t.app.QueueUpdateDraw(func() {
+					t.drawContainers()
+				})
+
+			case viewContainerLog:
+				t.logger.DebugContext(ctx, "fetching logs for container", slog.String("container_id", t.currentIDTargeted))
+				response := make(chan dto.Container)
+				t.requestData <- &RequestContainerLog{
+					ContainerID: dto.ContainerID(t.currentIDTargeted),
+					Response:    response,
+				}
+
+				c := <-response
+				ctxCancel = c.LogCancel
 
 				t.app.QueueUpdateDraw(func() {
 					t.drawContainers()

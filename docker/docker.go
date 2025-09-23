@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,9 +86,22 @@ func (d *Docker) handleRequests(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "handleRequests context is done")
-			return
 		case req := <-d.requestData:
 			switch r := req.(type) {
+
+			case *tui.RequestContainerLog:
+				ctxLog, cancel := context.WithCancel(ctx)
+				c := d.handleRequestContainerLog(ctxLog, r)
+				r.Response <- dto.Container{
+					ID:               dto.ContainerID(c.ID),
+					Project:          c.Project,
+					Service:          c.Service,
+					Name:             c.Name,
+					CPUPercentage:    c.CPUPercentage,
+					MemoryPercentage: c.MemoryPercentage,
+					IsRunning:        c.IsRunning,
+					LogCancel:        cancel,
+				}
 
 			case *tui.RequestProject:
 				d.handleRequestContainerProject(r)
@@ -97,6 +111,22 @@ func (d *Docker) handleRequests(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (d *Docker) handleRequestContainerLog(ctx context.Context, r *tui.RequestContainerLog) *Container {
+	response := make(chan *Container)
+	d.containersCommand <- ContainersCommand{
+		functor: func(docker *Docker) *Container {
+			return docker.containers[ContainerID(r.ContainerID)]
+		},
+		response: response,
+	}
+
+	c := <-response
+
+	go d.collectContainerLogs(ctx, c)
+
+	return c
 }
 
 func (d *Docker) handleRequestContainerProject(r *tui.RequestProject) {
@@ -180,6 +210,48 @@ func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
 
 			return nil
 		},
+	}
+}
+
+func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
+	out, err := d.client.ContainerLogs(ctx, string(c.ID), apiContainer.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: true,
+		Follow:     true,
+		Tail:       "100",
+	})
+
+	if err != nil {
+		d.logger.ErrorContext(ctx, "container logs failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+
+		return
+	}
+
+	defer out.Close()
+
+	reader := bufio.NewReader(out)
+	for {
+		select {
+		case <-ctx.Done():
+			d.logger.DebugContext(ctx, "collectContainerLogs context is done", slog.String("container_id", string(c.ID)))
+			return
+		default:
+			line, errReader := reader.ReadString('\n')
+			if errReader != nil {
+				if errReader == io.EOF {
+					break
+				}
+
+				d.logger.ErrorContext(ctx, "end of container logs", slog.String("container_id", string(c.ID)), slog.Any("error", errReader))
+			}
+
+			c.Command <- ContainerCommand{
+				functor: func(container *Container) {
+					container.AppendLog(line)
+				},
+			}
+		}
 	}
 }
 

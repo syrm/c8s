@@ -20,6 +20,7 @@ type Container struct {
 	Project          dto.ContainerProject
 	CPUPercentage    float64
 	MemoryPercentage float64
+	Logs             []string
 	IsRunning        bool
 	Command          chan ContainerCommand
 	cancel           context.CancelFunc
@@ -94,6 +95,10 @@ func (c *Container) handleCommands(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (c *Container) AppendLog(line string) {
+	c.Logs = append(c.Logs, line)
 }
 
 func (c *Container) Delete() {
