@@ -1,5 +1,7 @@
 package dto
 
+import "context"
+
 type ContainerID string
 
 type ContainerDeletable interface {
@@ -14,6 +16,7 @@ type Container struct {
 	CPUPercentage    float64
 	MemoryPercentage float64
 	IsRunning        bool
+	LogCancel        context.CancelFunc
 }
 
 func (c Container) Deleted() bool {
