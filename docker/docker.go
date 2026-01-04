@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	dockerClient "github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/syrm/c8s/dto"
 	"github.com/syrm/c8s/tui"
@@ -86,12 +88,18 @@ func (d *Docker) handleRequests(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "handleRequests context is done")
+			return
 		case req := <-d.requestData:
 			switch r := req.(type) {
 
 			case *tui.RequestContainerLog:
 				ctxLog, cancel := context.WithCancel(ctx)
 				c := d.handleRequestContainerLog(ctxLog, r)
+				if c == nil {
+					cancel()
+					r.Response <- dto.Container{}
+					continue
+				}
 				r.Response <- dto.Container{
 					ID:               dto.ContainerID(c.ID),
 					Project:          c.Project,
@@ -125,7 +133,14 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *tui.RequestCo
 
 	c := <-response
 
-	go d.collectContainerLogs(ctx, c)
+	if c != nil && !c.LogCollectionActive {
+		c.Command <- ContainerCommand{
+			functor: func(container *Container) {
+				container.LogCollectionActive = true
+			},
+		}
+		go d.collectContainerLogs(ctx, c)
+	}
 
 	return c
 }
@@ -215,12 +230,29 @@ func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
 }
 
 func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
+	if c == nil {
+		return
+	}
+	defer func() {
+		// Reset flag when collection ends
+		select {
+		case c.Command <- ContainerCommand{
+			functor: func(container *Container) {
+				container.LogCollectionActive = false
+			},
+		}:
+		default:
+			// Channel closed or full, container might be deleted
+		}
+	}()
+
+	since := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
 	out, err := d.client.ContainerLogs(ctx, string(c.ID), apiContainer.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Timestamps: true,
 		Follow:     true,
-		Tail:       "100",
+		Since:      since,
 	})
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container logs failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
@@ -230,20 +262,34 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 
 	defer out.Close()
 
-	reader := bufio.NewReader(out)
+	// Use a pipe to demultiplex the Docker log stream
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	go func() {
+		defer pw.Close()
+		_, err := stdcopy.StdCopy(pw, pw, out)
+		if err != nil && err != io.EOF {
+			d.logger.DebugContext(ctx, "stdcopy finished", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+		}
+	}()
+
+	reader := bufio.NewReader(pr)
 	for {
 		select {
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "collectContainerLogs context is done", slog.String("container_id", string(c.ID)))
+			pr.Close() // Unblock stdcopy goroutine
 			return
 		default:
 			line, errReader := reader.ReadString('\n')
 			if errReader != nil {
 				if errReader == io.EOF {
-					break
+					return
 				}
 
 				d.logger.ErrorContext(ctx, "end of container logs", slog.String("container_id", string(c.ID)), slog.Any("error", errReader))
+				return
 			}
 
 			c.Command <- ContainerCommand{
@@ -329,6 +375,18 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 	}
 
 	defer dockerContainerStats.Body.Close()
+	defer func() {
+		// Clean up container when stats streaming ends
+		d.containersCommand <- ContainersCommand{
+			functor: func(docker *Docker) *Container {
+				delete(docker.containers, c.ID)
+				c.Delete()
+
+				return nil
+			},
+		}
+		d.logger.DebugContext(ctx, "container removed after stats ended", slog.String("container_id", string(c.ID)))
+	}()
 
 	dec := json.NewDecoder(dockerContainerStats.Body)
 

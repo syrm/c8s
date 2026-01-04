@@ -14,17 +14,18 @@ import (
 type ContainerID string
 
 type Container struct {
-	ID               ContainerID
-	Service          string
-	Name             string
-	Project          dto.ContainerProject
-	CPUPercentage    float64
-	MemoryPercentage float64
-	Logs             []string
-	IsRunning        bool
-	Command          chan ContainerCommand
-	cancel           context.CancelFunc
-	logger           *slog.Logger
+	ID                  ContainerID
+	Service             string
+	Name                string
+	Project             dto.ContainerProject
+	CPUPercentage       float64
+	MemoryPercentage    float64
+	Logs                []string
+	IsRunning           bool
+	LogCollectionActive bool
+	Command             chan ContainerCommand
+	cancel              context.CancelFunc
+	logger              *slog.Logger
 }
 
 type ContainerResponse struct {
@@ -97,12 +98,19 @@ func (c *Container) handleCommands(ctx context.Context) {
 	}
 }
 
+const maxLogLines = 1000
+
 func (c *Container) AppendLog(line string) {
 	c.Logs = append(c.Logs, line)
+	// Limit log size to prevent memory leak
+	if len(c.Logs) > maxLogLines {
+		c.Logs = c.Logs[len(c.Logs)-maxLogLines:]
+	}
 }
 
 func (c *Container) Delete() {
 	c.cancel()
+	c.Logs = nil // Clear logs to free memory
 }
 
 func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
