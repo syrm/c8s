@@ -15,6 +15,7 @@ type Container struct {
 	Name             string
 	CPUPercentage    float64
 	MemoryPercentage float64
+	Logs             []string
 	IsRunning        bool
 	LogCancel        context.CancelFunc
 }

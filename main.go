@@ -12,13 +12,13 @@ import (
 func main() {
 	ctx := context.Background()
 
-	file, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+	file, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o666)
 	if err != nil {
 		panic(err)
 	}
 	defer file.Close()
 
-	logger := slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug}))
+	logger := slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{AddSource: true, Level: slog.LevelInfo}))
 
 	// ctx2, cancel := context.WithTimeout(ctx, 10 * time.Second)
 	// defer cancel()

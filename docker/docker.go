@@ -100,6 +100,7 @@ func (d *Docker) handleRequests(ctx context.Context) {
 					CPUPercentage:    c.CPUPercentage,
 					MemoryPercentage: c.MemoryPercentage,
 					IsRunning:        c.IsRunning,
+					Logs:             c.Logs,
 					LogCancel:        cancel,
 				}
 
@@ -221,7 +222,6 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		Follow:     true,
 		Tail:       "100",
 	})
-
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container logs failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 
@@ -377,7 +377,6 @@ func (d *Docker) handleContainersCommand(ctx context.Context) error {
 			d.logger.DebugContext(ctx, "handleContainersCommand context is done")
 			return nil
 		}
-
 	}
 }
 
@@ -438,7 +437,9 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			return
 
 		case err := <-errs:
-			d.logger.ErrorContext(ctx, "event", slog.Any("error", err))
+			if err != nil {
+				d.logger.ErrorContext(ctx, "event", slog.Any("error", err))
+			}
 		}
 	}
 }

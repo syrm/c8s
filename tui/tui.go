@@ -61,7 +61,8 @@ type Tui struct {
 	tableContainerLogData  []string
 	currentView            currentView
 	currentViewLock        sync.RWMutex
-	currentIDTargeted      string
+	currentProjectID       string
+	currentContainerID     string
 	requestData            chan RequestData
 	logger                 *slog.Logger
 }
@@ -83,6 +84,9 @@ func NewTui(logger *slog.Logger) *Tui {
 	tableContainer.SetBorder(true)
 
 	tableContainerLog := tview.NewTextView()
+	tableContainerLog.SetScrollable(true)
+	tableContainerLog.SetWordWrap(true)
+	tableContainerLog.SetBorder(true)
 
 	tui := &Tui{
 		app:                app,
@@ -102,7 +106,7 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.tableProjectDataLock.RLock()
 			for _, project := range tui.tableProjectData {
 				if project.Name == tableProject.GetCell(rowIndex, 0).Text {
-					tui.currentIDTargeted = string(project.ID)
+					tui.currentProjectID = string(project.ID)
 					tui.currentViewLock.Lock()
 					tui.currentView = viewProject
 					tui.currentViewLock.Unlock()
@@ -124,7 +128,7 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.currentViewLock.Lock()
 			tui.currentView = viewProjectList
 			tui.currentViewLock.Unlock()
-			tui.currentIDTargeted = ""
+			tui.currentContainerID = ""
 		}
 
 		if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyRight {
@@ -132,15 +136,30 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.tableContainerDataLock.RLock()
 			for _, container := range tui.tableContainerData {
 				if container.Service == tableContainer.GetCell(rowIndex, 0).Text {
-					tui.currentIDTargeted = string(container.ID)
+					tui.currentContainerID = string(container.ID)
 					break
 				}
 			}
 			tui.tableContainerDataLock.RUnlock()
+			tui.drawContainerLog()
 			tui.app.SetRoot(tui.tableContainerLog, true)
 			tui.currentViewLock.Lock()
 			tui.currentView = viewContainerLog
 			tui.currentViewLock.Unlock()
+		}
+
+		return event
+	})
+
+	tableContainerLog.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc || event.Key() == tcell.KeyLeft {
+			tui.tableContainer.Clear()
+			tui.drawContainers()
+			tui.app.SetRoot(tui.tableContainer, true)
+			tui.currentViewLock.Lock()
+			tui.currentView = viewProject
+			tui.currentViewLock.Unlock()
+			tui.currentContainerID = ""
 		}
 
 		return event
@@ -228,11 +247,11 @@ func (t *Tui) drawContainers() {
 
 	t.tableContainer.Clear()
 	t.tableProjectDataLock.RLock()
-	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(t.currentIDTargeted)].Name)
+	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(t.currentProjectID)].Name)
 	t.tableProjectDataLock.RUnlock()
 	index := 0
 	for _, container := range containers {
-		if string(container.Project.ID) != t.currentIDTargeted {
+		if string(container.Project.ID) != t.currentProjectID {
 			continue
 		}
 		index += 1
@@ -259,7 +278,19 @@ func (t *Tui) drawContainers() {
 
 func (t *Tui) drawContainerLog() {
 	t.tableContainerLog.Clear()
-	t.tableContainerLog.SetText(strings.Join(t.tableContainerLogData, "\n"))
+
+	t.tableContainerDataLock.RLock()
+	container, ok := t.tableContainerData[dto.ContainerID(t.currentContainerID)]
+	t.tableContainerDataLock.RUnlock()
+
+	if ok {
+		t.tableContainerLog.SetTitle(fmt.Sprintf(" [::b]%s logs (%s) ", container.Service, container.Name))
+	}
+
+	t.tableContainerLog.SetText(strings.Join(t.tableContainerLogData, ""))
+
+	// Auto-scroll to bottom
+	t.tableContainerLog.ScrollToEnd()
 }
 
 func (t *Tui) GetRequestData() <-chan RequestData {
@@ -312,7 +343,7 @@ func (t *Tui) getData(ctx context.Context) {
 
 				response := make(chan []dto.Container)
 				t.requestData <- &RequestProject{
-					ProjectID: dto.ProjectID(t.currentIDTargeted),
+					ProjectID: dto.ProjectID(t.currentProjectID),
 					Response:  response,
 				}
 
@@ -329,18 +360,32 @@ func (t *Tui) getData(ctx context.Context) {
 				})
 
 			case viewContainerLog:
-				t.logger.DebugContext(ctx, "fetching logs for container", slog.String("container_id", t.currentIDTargeted))
+				t.logger.DebugContext(ctx, "fetching logs for container", slog.String("container_id", t.currentContainerID))
+
+				// First time we enter this view, start the log collection
+				if ctxCancel == nil {
+					response := make(chan dto.Container)
+					t.requestData <- &RequestContainerLog{
+						ContainerID: dto.ContainerID(t.currentContainerID),
+						Response:    response,
+					}
+					c := <-response
+					ctxCancel = c.LogCancel
+				}
+
+				// Always get the latest logs
 				response := make(chan dto.Container)
 				t.requestData <- &RequestContainerLog{
-					ContainerID: dto.ContainerID(t.currentIDTargeted),
+					ContainerID: dto.ContainerID(t.currentContainerID),
 					Response:    response,
 				}
 
 				c := <-response
-				ctxCancel = c.LogCancel
+
+				t.tableContainerLogData = c.Logs
 
 				t.app.QueueUpdateDraw(func() {
-					t.drawContainers()
+					t.drawContainerLog()
 				})
 			}
 		}
