@@ -214,13 +214,13 @@ func NewTui(logger *slog.Logger) *Tui {
   [cyan]Projects list:[-]
     Enter / Right    Enter project                 /    Search projects
     c                Clear search filter           h    Show this help
-    1-4              Sort by column (toggle asc/desc)
+    Shift+N/C/M/O    Sort by Name/CPU/Mem/Cont
 
   [cyan]Containers list:[-]
     Enter / Right    View container logs           Esc / Left    Back to projects
     /                Search containers             c              Clear search filter
     Up / Down        Navigate (pauses 5s)          h              Show this help
-    1-3              Sort by column (toggle asc/desc)
+    Shift+N/C/M      Sort by Name/CPU/Mem
 
   [cyan]Container logs:[-]
     Esc / Left       Back to containers            p    Pause/unpause logs
@@ -245,10 +245,10 @@ func NewTui(logger *slog.Logger) *Tui {
 		SetRows(0, 18, 0).
 		AddItem(helpTextView, 1, 1, 1, 1, 0, 0, true)
 
-	// Create header view (k9s style - blue background)
+	// Create header view
 	headerView := tview.NewTextView()
 	headerView.SetDynamicColors(true)
-	headerView.SetBackgroundColor(tcell.ColorNavy)
+	headerView.SetBackgroundColor(tcell.ColorBlack)
 	headerView.SetTextAlign(tview.AlignLeft)
 	headerView.SetText(" [white::b]c8s[-::]")
 
@@ -304,7 +304,25 @@ func NewTui(logger *slog.Logger) *Tui {
 	pages.AddPage("help", helpModal, true, false)
 
 	tableProject.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Rune() == '/' {
+		r := event.Rune()
+
+		// Sort by column (Shift+N=Name, Shift+C=CPU, Shift+M=Memory, Shift+O=Containers)
+		switch r {
+		case 'N':
+			tui.setProjectSort(projectSortName)
+			return nil
+		case 'C':
+			tui.setProjectSort(projectSortCPU)
+			return nil
+		case 'M':
+			tui.setProjectSort(projectSortMemory)
+			return nil
+		case 'O':
+			tui.setProjectSort(projectSortContainers)
+			return nil
+		}
+
+		if r == '/' {
 			tui.projectSearchActive = true
 			tui.projectSearchInput.SetText(tui.projectSearchQuery) // Restore current filter
 			tui.projectLayout.AddItem(tui.projectSearchInput, 1, 0, true)
@@ -312,32 +330,16 @@ func NewTui(logger *slog.Logger) *Tui {
 			return nil
 		}
 
-		if event.Rune() == 'c' && tui.projectSearchQuery != "" {
+		if r == 'c' && tui.projectSearchQuery != "" {
 			// Clear filter with 'c' key
 			tui.projectSearchQuery = ""
 			tui.drawProjects()
 			return nil
 		}
 
-		if event.Rune() == 'h' {
+		if r == 'h' {
 			tui.pages.ShowPage("help")
 			tui.app.SetFocus(tui.helpTextView)
-			return nil
-		}
-
-		// Sort by column (1=Name, 2=CPU, 3=Memory, 4=Containers)
-		switch event.Rune() {
-		case '1':
-			tui.setProjectSort(projectSortName)
-			return nil
-		case '2':
-			tui.setProjectSort(projectSortCPU)
-			return nil
-		case '3':
-			tui.setProjectSort(projectSortMemory)
-			return nil
-		case '4':
-			tui.setProjectSort(projectSortContainers)
 			return nil
 		}
 
@@ -386,7 +388,22 @@ func NewTui(logger *slog.Logger) *Tui {
 	})
 
 	tableContainer.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Rune() == '/' {
+		r := event.Rune()
+
+		// Sort by column (Shift+N=Name, Shift+C=CPU, Shift+M=Memory)
+		switch r {
+		case 'N':
+			tui.setContainerSort(containerSortName)
+			return nil
+		case 'C':
+			tui.setContainerSort(containerSortCPU)
+			return nil
+		case 'M':
+			tui.setContainerSort(containerSortMemory)
+			return nil
+		}
+
+		if r == '/' {
 			tui.containerSearchActive = true
 			tui.containerSearchInput.SetText(tui.containerSearchQuery) // Restore current filter
 			tui.containerLayout.AddItem(tui.containerSearchInput, 1, 0, true)
@@ -394,29 +411,16 @@ func NewTui(logger *slog.Logger) *Tui {
 			return nil
 		}
 
-		if event.Rune() == 'c' && tui.containerSearchQuery != "" {
+		if r == 'c' && tui.containerSearchQuery != "" {
 			// Clear filter with 'c' key
 			tui.containerSearchQuery = ""
 			tui.drawContainers()
 			return nil
 		}
 
-		if event.Rune() == 'h' {
+		if r == 'h' {
 			tui.pages.ShowPage("help")
 			tui.app.SetFocus(tui.helpTextView)
-			return nil
-		}
-
-		// Sort by column (1=Name, 2=CPU, 3=Memory)
-		switch event.Rune() {
-		case '1':
-			tui.setContainerSort(containerSortName)
-			return nil
-		case '2':
-			tui.setContainerSort(containerSortCPU)
-			return nil
-		case '3':
-			tui.setContainerSort(containerSortMemory)
 			return nil
 		}
 
@@ -672,9 +676,9 @@ func (t *Tui) getSortIndicator(isActive bool, isAsc bool) string {
 		return ""
 	}
 	if isAsc {
-		return "↑"
+		return "[fuchsia]↑[-]"
 	}
-	return "↓"
+	return "[fuchsia]↓[-]"
 }
 
 func (t *Tui) RenderProjectHeader() {
@@ -683,13 +687,9 @@ func (t *Tui) RenderProjectHeader() {
 	memIndicator := t.getSortIndicator(t.projectSortColumn == projectSortMemory, t.projectSortAsc)
 	contIndicator := t.getSortIndicator(t.projectSortColumn == projectSortContainers, t.projectSortAsc)
 
-	// Column 0: Project name
 	t.tableProject.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("[cyan::b]NAME%s[-::-]", nameIndicator)).SetAlign(tview.AlignLeft).SetExpansion(3).SetSelectable(false))
-	// Column 1: CPU
 	t.tableProject.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	// Column 2: Memory
 	t.tableProject.SetCell(0, 2, tview.NewTableCell(fmt.Sprintf("[cyan::b]MEM%s[-::-]", memIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	// Column 3: Container count
 	t.tableProject.SetCell(0, 3, tview.NewTableCell(fmt.Sprintf("[cyan::b]CONT%s[-::-]", contIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetSelectable(false))
 	t.tableProject.SetFixed(1, 0)
 }
@@ -699,11 +699,8 @@ func (t *Tui) RenderContainerHeader(project string) {
 	cpuIndicator := t.getSortIndicator(t.containerSortColumn == containerSortCPU, t.containerSortAsc)
 	memIndicator := t.getSortIndicator(t.containerSortColumn == containerSortMemory, t.containerSortAsc)
 
-	// Column 0: Container/Service name
 	t.tableContainer.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("[cyan::b]NAME%s[-::-]", nameIndicator)).SetAlign(tview.AlignLeft).SetExpansion(3).SetSelectable(false))
-	// Column 1: CPU
 	t.tableContainer.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	// Column 2: Memory
 	t.tableContainer.SetCell(0, 2, tview.NewTableCell(fmt.Sprintf("[cyan::b]MEM%s[-::-]", memIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
 	t.tableContainer.SetFixed(1, 0)
 }
@@ -1280,17 +1277,17 @@ func (t *Tui) updateHeader() {
 
 		filter := ""
 		if t.projectSearchQuery != "" {
-			filter = fmt.Sprintf(" [yellow]| filter: %s[-]", t.projectSearchQuery)
+			filter = fmt.Sprintf(" [white](filter: %s)[-]", t.projectSearchQuery)
 		}
 
 		t.projectRefreshPausedLock.RLock()
 		paused := ""
 		if t.projectRefreshPaused {
-			paused = " [yellow]| PAUSED[-]"
+			paused = " [fuchsia]PAUSED[-]"
 		}
 		t.projectRefreshPausedLock.RUnlock()
 
-		text = fmt.Sprintf(" [black::b]c8s[-::] [black]|[-] Projects [%d]%s%s", count, filter, paused)
+		text = fmt.Sprintf(" [white::b]c8s[-::] [white]|[-] [white]Projects([fuchsia]%d[-])[-]%s%s", count, filter, paused)
 
 	case viewProject:
 		t.tableContainerDataLock.RLock()
@@ -1311,17 +1308,17 @@ func (t *Tui) updateHeader() {
 
 		filter := ""
 		if t.containerSearchQuery != "" {
-			filter = fmt.Sprintf(" [yellow]| filter: %s[-]", t.containerSearchQuery)
+			filter = fmt.Sprintf(" [white](filter: %s)[-]", t.containerSearchQuery)
 		}
 
 		t.containerRefreshPausedLock.RLock()
 		paused := ""
 		if t.containerRefreshPaused {
-			paused = " [yellow]| PAUSED[-]"
+			paused = " [fuchsia]PAUSED[-]"
 		}
 		t.containerRefreshPausedLock.RUnlock()
 
-		text = fmt.Sprintf(" [black::b]c8s[-::] [black]|[-] Containers [%d] [black]|[-] project: [black::b]%s[-::]%s%s",
+		text = fmt.Sprintf(" [white::b]c8s[-::] [white]|[-] [white]Containers([fuchsia]%d[-])[-] [white](%s)[-]%s%s",
 			count, projectName, filter, paused)
 
 	case viewContainerLog:
@@ -1329,24 +1326,36 @@ func (t *Tui) updateHeader() {
 
 		t.logPausedLock.RLock()
 		if t.logPaused {
-			status += " [yellow]| PAUSED[-]"
+			status += " [fuchsia]PAUSED[-]"
 		}
 		t.logPausedLock.RUnlock()
 
 		t.logFilterLock.RLock()
 		if t.logFilter != "" {
-			status += fmt.Sprintf(" [yellow]| filter: %s[-]", t.logFilter)
+			status += fmt.Sprintf(" [white](filter: %s)[-]", t.logFilter)
 		}
 		t.logFilterLock.RUnlock()
 
 		t.logShowTimestampLock.RLock()
 		if t.logShowTimestamp {
-			status += " [yellow]| time[-]"
+			status += " [white](time)[-]"
 		}
 		t.logShowTimestampLock.RUnlock()
 
-		text = fmt.Sprintf(" [black::b]c8s[-::] [black]|[-] Logs [black]|[-] container: [black::b]%s[-::]%s",
-			t.currentContainerService, status)
+		projectName := "unknown"
+		if t.currentProjectID != "" {
+			t.tableProjectDataLock.RLock()
+			for _, project := range t.tableProjectData {
+				if string(project.ID) == t.currentProjectID {
+					projectName = project.Name
+					break
+				}
+			}
+			t.tableProjectDataLock.RUnlock()
+		}
+
+		text = fmt.Sprintf(" [white::b]c8s[-::] [white]|[-] [white]Logs[-] [white]%s[-] [white](%s)[-]%s",
+			t.currentContainerService, projectName, status)
 	}
 
 	t.headerView.SetText(text)
