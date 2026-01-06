@@ -100,18 +100,7 @@ func (d *Docker) handleRequests(ctx context.Context) {
 					r.Response <- dto.Container{}
 					continue
 				}
-				r.Response <- dto.Container{
-					ID:               dto.ContainerID(c.ID),
-					Project:          c.Project,
-					Service:          c.Service,
-					Name:             c.Name,
-					CPUPercentage:    c.CPUPercentage,
-					MemoryPercentage: c.MemoryPercentage,
-					Status:           c.Status,
-					PendingAction:    c.PendingAction,
-					Logs:             c.Logs,
-					LogCancel:        cancel,
-				}
+				r.Response <- containerToDTO(c, true, cancel)
 
 			case *tui.RequestProject:
 				d.handleRequestContainerProject(r)
@@ -160,24 +149,11 @@ func (d *Docker) handleRequestContainerProject(r *tui.RequestProject) {
 					c.Command <- ContainerCommand{
 						response: response,
 					}
-
 					container := <-response
-
-					containers = append(containers, dto.Container{
-						ID:               dto.ContainerID(container.ID),
-						Project:          container.Project,
-						Service:          container.Service,
-						Name:             container.Name,
-						CPUPercentage:    container.CPUPercentage,
-						MemoryPercentage: container.MemoryPercentage,
-						Status:           container.Status,
-						PendingAction:    container.PendingAction,
-					})
+					containers = append(containers, containerResponseToDTO(container))
 				}
 			}
-
 			r.Response <- containers
-
 			return nil
 		},
 	}
