@@ -20,9 +20,6 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{AddSource: true, Level: slog.LevelInfo}))
 
-	// ctx2, cancel := context.WithTimeout(ctx, 10 * time.Second)
-	// defer cancel()
-
 	t := tui.NewTui(logger)
 
 	doc := docker.NewDocker(ctx, t.GetRequestData(), logger)

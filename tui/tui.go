@@ -29,6 +29,12 @@ const (
 	viewContainerLog
 )
 
+const (
+	refreshInterval      = 2 * time.Second
+	refreshPauseDuration = 5 * time.Second
+	statusMessageDuration = 5 * time.Second
+)
+
 type projectSortColumn int
 
 const (
@@ -126,10 +132,9 @@ type Tui struct {
 	projectSortAsc             bool
 	containerSortColumn        containerSortColumn
 	containerSortAsc           bool
-	currentProjectName        string
-	currentStatusMaxWidth     atomic.Int32
-	currentTableWidth         atomic.Int32
-	containerDisappeared      bool
+	currentProjectName         string
+	currentTableWidth          atomic.Int32
+	containerDisappeared       bool
 	containerDisappearedLock   sync.RWMutex
 	containerDisappearedModal  *tview.Modal
 	helpModal                  *tview.Grid
@@ -299,11 +304,8 @@ func NewTui(logger *slog.Logger) *Tui {
 		containerSortColumn:       containerSortCPU,
 		containerSortAsc:          false,
 		currentProjectName:        "",
-		currentStatusMaxWidth:     atomic.Int32{},
+		currentTableWidth:         atomic.Int32{},
 	}
-
-	// Initialize status max width
-	tui.currentStatusMaxWidth.Store(12)
 
 	// Add pages to the pages widget
 	pages.AddPage("projectList", projectLayout, true, true)
@@ -314,12 +316,8 @@ func NewTui(logger *slog.Logger) *Tui {
 
 	// Hook to update column widths on resize
 	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
-		// Get screen size and calculate approximate table width
-		// Table width is screen width minus borders (2 chars)
 		screenWidth, _ := screen.Size()
-		tableWidth := screenWidth - 2
-		tui.currentTableWidth.Store(int32(tableWidth))
-		tui.currentStatusMaxWidth.Store(int32(tui.calculateStatusWidth(tableWidth)))
+		tui.currentTableWidth.Store(int32(screenWidth - 2))
 		return false
 	})
 
@@ -351,7 +349,6 @@ func NewTui(logger *slog.Logger) *Tui {
 		}
 
 		if r == 'c' && tui.projectSearchQuery != "" {
-			// Clear filter with 'c' key
 			tui.projectSearchQuery = ""
 			tui.drawProjects()
 			return nil
@@ -395,7 +392,6 @@ func NewTui(logger *slog.Logger) *Tui {
 				tui.projectRefreshTimer = nil
 			}
 			tui.projectRefreshTimerLock.Unlock()
-			// Update header immediately after view change
 			tui.updateHeader()
 		}
 
@@ -436,7 +432,6 @@ func NewTui(logger *slog.Logger) *Tui {
 		}
 
 		if r == 'c' && tui.containerSearchQuery != "" {
-			// Clear filter with 'c' key
 			tui.containerSearchQuery = ""
 			tui.drawContainers()
 			return nil
@@ -476,7 +471,6 @@ func NewTui(logger *slog.Logger) *Tui {
 			return nil
 		}
 
-		// x: Stop container
 		if r == 'x' {
 			rowIndex, _ := tui.tableContainer.GetSelection()
 			if rowIndex > 0 {
@@ -520,7 +514,6 @@ func NewTui(logger *slog.Logger) *Tui {
 			return nil
 		}
 
-		// r: Start/Restart container
 		if r == 'r' {
 			rowIndex, _ := tui.tableContainer.GetSelection()
 			if rowIndex > 0 {
@@ -575,7 +568,6 @@ func NewTui(logger *slog.Logger) *Tui {
 			return nil
 		}
 
-		// d: Remove container (stopped only)
 		if r == 'd' {
 			rowIndex, _ := tui.tableContainer.GetSelection()
 			if rowIndex > 0 {
@@ -625,10 +617,8 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.currentView = viewProjectList
 			tui.currentViewLock.Unlock()
 			tui.currentContainerID = ""
-			// Reset container filter when leaving
 			tui.containerSearchQuery = ""
 			tui.containerSearchInput.SetText("")
-			// Reset refresh pause when leaving view
 			tui.containerRefreshPausedLock.Lock()
 			tui.containerRefreshPaused = false
 			tui.containerRefreshPausedLock.Unlock()
@@ -638,7 +628,6 @@ func NewTui(logger *slog.Logger) *Tui {
 				tui.containerRefreshTimer = nil
 			}
 			tui.containerRefreshTimerLock.Unlock()
-			// Update header immediately after view change
 			tui.updateHeader()
 		}
 
@@ -661,7 +650,6 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.currentViewLock.Lock()
 			tui.currentView = viewContainerLog
 			tui.currentViewLock.Unlock()
-			// Update header immediately after view change
 			tui.updateHeader()
 		}
 
@@ -704,7 +692,6 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.logPaused = !tui.logPaused
 			tui.logPausedLock.Unlock()
 			tui.drawContainerLog()
-			// Update header immediately to show pause status
 			tui.updateHeader()
 		}
 
@@ -722,7 +709,6 @@ func NewTui(logger *slog.Logger) *Tui {
 				tui.logFilterInput.SetText("")
 				tui.logLayout.RemoveItem(tui.logFilterInput)
 				tui.drawContainerLog()
-				// Update header immediately to show filter was cleared
 				tui.updateHeader()
 			} else {
 				tui.logFilterLock.Unlock()
@@ -734,7 +720,6 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.logShowTimestamp = !tui.logShowTimestamp
 			tui.logShowTimestampLock.Unlock()
 			tui.drawContainerLog()
-			// Update header immediately to show timestamp status
 			tui.updateHeader()
 		}
 
@@ -748,27 +733,18 @@ func NewTui(logger *slog.Logger) *Tui {
 	})
 
 	logFilterInput.SetDoneFunc(func(key tcell.Key) {
+		tui.logFilterLock.Lock()
 		if key == tcell.KeyEnter {
-			tui.logFilterLock.Lock()
 			tui.logFilter = logFilterInput.GetText()
-			tui.logFilterLock.Unlock()
-			tui.logLayout.RemoveItem(tui.logFilterInput)
-			tui.app.SetFocus(tui.tableContainerLog)
-			tui.drawContainerLog()
-			// Update header immediately to show filter status
-			tui.updateHeader()
-		}
-		if key == tcell.KeyEsc {
-			tui.logFilterLock.Lock()
+		} else {
 			tui.logFilter = ""
-			tui.logFilterLock.Unlock()
 			logFilterInput.SetText("")
-			tui.logLayout.RemoveItem(tui.logFilterInput)
-			tui.app.SetFocus(tui.tableContainerLog)
-			tui.drawContainerLog()
-			// Update header immediately to show filter status
-			tui.updateHeader()
 		}
+		tui.logFilterLock.Unlock()
+		tui.logLayout.RemoveItem(tui.logFilterInput)
+		tui.app.SetFocus(tui.tableContainerLog)
+		tui.drawContainerLog()
+		tui.updateHeader()
 	})
 
 	containerDisappearedModal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
@@ -795,7 +771,6 @@ func NewTui(logger *slog.Logger) *Tui {
 		tui.logFilterInput.SetText("")
 		tui.logLayout.RemoveItem(tui.logFilterInput)
 		tui.tableContainerLogData = nil
-		// Update header immediately after view change
 		tui.updateHeader()
 	})
 
@@ -813,20 +788,14 @@ func NewTui(logger *slog.Logger) *Tui {
 	})
 
 	projectSearchInput.SetDoneFunc(func(key tcell.Key) {
+		tui.projectSearchActive = false
+		tui.projectLayout.RemoveItem(tui.projectSearchInput)
+		tui.app.SetFocus(tui.tableProject)
 		if key == tcell.KeyEsc {
-			// ESC: Clear filter and exit filter mode
-			tui.projectSearchActive = false
 			tui.projectSearchQuery = ""
 			tui.projectSearchInput.SetText("")
-			tui.projectLayout.RemoveItem(tui.projectSearchInput)
-			tui.app.SetFocus(tui.tableProject)
-			tui.drawProjects()
-		} else if key == tcell.KeyEnter {
-			// Enter: Keep filter and exit filter mode
-			tui.projectSearchActive = false
-			tui.projectLayout.RemoveItem(tui.projectSearchInput)
-			tui.app.SetFocus(tui.tableProject)
 		}
+		tui.drawProjects()
 	})
 
 	containerSearchInput.SetChangedFunc(func(text string) {
@@ -835,20 +804,14 @@ func NewTui(logger *slog.Logger) *Tui {
 	})
 
 	containerSearchInput.SetDoneFunc(func(key tcell.Key) {
+		tui.containerSearchActive = false
+		tui.containerLayout.RemoveItem(tui.containerSearchInput)
+		tui.app.SetFocus(tui.tableContainer)
 		if key == tcell.KeyEsc {
-			// ESC: Clear filter and exit filter mode
-			tui.containerSearchActive = false
 			tui.containerSearchQuery = ""
 			tui.containerSearchInput.SetText("")
-			tui.containerLayout.RemoveItem(tui.containerSearchInput)
-			tui.app.SetFocus(tui.tableContainer)
-			tui.drawContainers()
-		} else if key == tcell.KeyEnter {
-			// Enter: Keep filter and exit filter mode
-			tui.containerSearchActive = false
-			tui.containerLayout.RemoveItem(tui.containerSearchInput)
-			tui.app.SetFocus(tui.tableContainer)
 		}
+		tui.drawContainers()
 	})
 
 	return tui
@@ -1134,8 +1097,7 @@ func (t *Tui) drawContainers() {
 		}
 
 		// Truncate status text if needed based on available screen width
-		// Use stored width from BeforeDrawFunc to get current value
-		maxWidth := int(t.currentStatusMaxWidth.Load())
+		maxWidth := t.calculateStatusWidth(int(t.currentTableWidth.Load()))
 		if len(displayText) > maxWidth {
 			// Truncate and add ellipsis if needed
 			if maxWidth > 3 {
@@ -1465,8 +1427,8 @@ func (t *Tui) showStatusMessage(message string) {
 		t.statusTimer.Stop()
 	}
 
-	// Clear message after 5 seconds
-	t.statusTimer = time.AfterFunc(5*time.Second, func() {
+	// Clear message after duration
+	t.statusTimer = time.AfterFunc(statusMessageDuration, func() {
 		t.app.QueueUpdateDraw(func() {
 			t.containerLayout.RemoveItem(t.statusBar)
 			t.statusBar.SetText("")
@@ -1485,8 +1447,8 @@ func (t *Tui) pauseContainerRefresh() {
 		t.containerRefreshTimer.Stop()
 	}
 
-	// Resume refresh after 5 seconds
-	t.containerRefreshTimer = time.AfterFunc(5*time.Second, func() {
+	// Resume refresh after duration
+	t.containerRefreshTimer = time.AfterFunc(refreshPauseDuration, func() {
 		t.containerRefreshPausedLock.Lock()
 		t.containerRefreshPaused = false
 		t.containerRefreshPausedLock.Unlock()
@@ -1529,8 +1491,8 @@ func (t *Tui) pauseProjectRefresh() {
 		t.projectRefreshTimer.Stop()
 	}
 
-	// Resume refresh after 5 seconds
-	t.projectRefreshTimer = time.AfterFunc(5*time.Second, func() {
+	// Resume refresh after duration
+	t.projectRefreshTimer = time.AfterFunc(refreshPauseDuration, func() {
 		t.projectRefreshPausedLock.Lock()
 		t.projectRefreshPaused = false
 		t.projectRefreshPausedLock.Unlock()
@@ -1641,7 +1603,7 @@ func (t *Tui) updateHeader() {
 }
 
 func (t *Tui) getData(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 
 	var ctxCancel context.CancelFunc
@@ -1662,7 +1624,6 @@ func (t *Tui) getData(ctx context.Context) {
 					ctxCancel = nil
 				}
 
-				// Check if refresh is paused due to navigation
 				t.projectRefreshPausedLock.RLock()
 				paused := t.projectRefreshPaused
 				t.projectRefreshPausedLock.RUnlock()
@@ -1693,7 +1654,6 @@ func (t *Tui) getData(ctx context.Context) {
 					ctxCancel = nil
 				}
 
-				// Check if refresh is paused due to navigation
 				t.containerRefreshPausedLock.RLock()
 				paused := t.containerRefreshPaused
 				t.containerRefreshPausedLock.RUnlock()
@@ -1729,7 +1689,6 @@ func (t *Tui) getData(ctx context.Context) {
 					continue
 				}
 
-				// Check if container has disappeared
 				t.containerDisappearedLock.RLock()
 				disappeared := t.containerDisappeared
 				t.containerDisappearedLock.RUnlock()

@@ -434,7 +434,6 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 }
 
 func (d *Docker) handleContainersCommand(ctx context.Context) error {
-	// @TODO a tester
 	defer func() {
 		if r := recover(); r != nil {
 			d.logger.ErrorContext(ctx, "panic in handleContainersCommand", slog.Any("recover", r))
