@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/syrm/c8s/dto"
@@ -125,6 +126,8 @@ type Tui struct {
 	projectSortAsc             bool
 	containerSortColumn        containerSortColumn
 	containerSortAsc           bool
+	currentProjectName         string
+	currentStatusMaxWidth      atomic.Int32
 	containerDisappeared       bool
 	containerDisappearedLock   sync.RWMutex
 	containerDisappearedModal  *tview.Modal
@@ -167,7 +170,7 @@ func NewTui(logger *slog.Logger) *Tui {
 		Bold(true))
 
 	projectSearchInput := tview.NewInputField()
-	projectSearchInput.SetLabel("[cyan]Search: [-]")
+	projectSearchInput.SetLabel("[cyan]Filter: [-]")
 	projectSearchInput.SetFieldWidth(0)
 	projectSearchInput.SetFieldBackgroundColor(tcell.ColorBlack)
 	projectSearchInput.SetFieldTextColor(tcell.ColorWhite)
@@ -180,7 +183,7 @@ func NewTui(logger *slog.Logger) *Tui {
 		Bold(true))
 
 	containerSearchInput := tview.NewInputField()
-	containerSearchInput.SetLabel("[cyan]Search: [-]")
+	containerSearchInput.SetLabel("[cyan]Filter: [-]")
 	containerSearchInput.SetFieldWidth(0)
 	containerSearchInput.SetFieldBackgroundColor(tcell.ColorBlack)
 	containerSearchInput.SetFieldTextColor(tcell.ColorWhite)
@@ -218,28 +221,17 @@ func NewTui(logger *slog.Logger) *Tui {
 			// Will be set in tui struct
 		})
 
-	helpText := `                          [cyan::b]Keyboard Shortcuts[-::-]
+	helpText := `                 [cyan::b]Keyboard Shortcuts[-::-]
 
-  [cyan]Projects list:[-]
-    Enter / Right    Enter project                 /    Search projects
-    c                Clear search filter           h    Show this help
-    Shift+N/C/M/O    Sort by Name/CPU/Mem/Cont
-
+  [cyan]Filtering:[-]
+    /    Activate filter     c    Clear filter
+    
   [cyan]Containers list:[-]
-    Enter / Right    View container logs           Esc / Left    Back to projects
-    /                Search containers             c              Clear search filter
-    Up / Down        Navigate (pauses 5s)          h              Show this help
-    Shift+N/C/M/S    Sort by Name/CPU/Mem/Stat     s              Open shell
-    x                Stop container                r              Start/Restart
-    d                Remove container (stopped only)
+    r    Start/Restart       x    Stop
+    d    Remove container    s    Open shell
 
   [cyan]Container logs:[-]
-    Esc / Left       Back to containers            p    Pause/unpause logs
-    f                Filter logs                   t    Toggle timestamps
-    h                Show this help
-
-
-                          [gray]Press Esc to close[-]`
+    p    Pause/unpause       t    Toggle timestamps`
 
 	helpTextView := tview.NewTextView()
 	helpTextView.SetText(helpText)
@@ -252,7 +244,7 @@ func NewTui(logger *slog.Logger) *Tui {
 
 	// Create a grid to center the help modal
 	helpModal := tview.NewGrid().
-		SetColumns(0, 82, 0).
+		SetColumns(0, 59, 0).
 		SetRows(0, 18, 0).
 		AddItem(helpTextView, 1, 1, 1, 1, 0, 0, true)
 
@@ -305,7 +297,12 @@ func NewTui(logger *slog.Logger) *Tui {
 		projectSortAsc:            false,
 		containerSortColumn:       containerSortCPU,
 		containerSortAsc:          false,
+		currentProjectName:        "",
+		currentStatusMaxWidth:     atomic.Int32{},
 	}
+
+	// Initialize status max width
+	tui.currentStatusMaxWidth.Store(12)
 
 	// Add pages to the pages widget
 	pages.AddPage("projectList", projectLayout, true, true)
@@ -313,6 +310,20 @@ func NewTui(logger *slog.Logger) *Tui {
 	pages.AddPage("logs", logLayout, true, false)
 	pages.AddPage("modal", containerDisappearedModal, false, false)
 	pages.AddPage("help", helpModal, true, false)
+
+	// Hook to update column widths on resize
+	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		tui.currentViewLock.RLock()
+		cv := tui.currentView
+		tui.currentViewLock.RUnlock()
+
+		if cv == viewProject {
+			// Get current screen width and calculate status max width
+			_, _, w, _ := tui.tableContainer.GetInnerRect()
+			tui.currentStatusMaxWidth.Store(int32(tui.calculateStatusWidth(w)))
+		}
+		return false
+	})
 
 	tableProject.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		r := event.Rune()
@@ -362,6 +373,7 @@ func NewTui(logger *slog.Logger) *Tui {
 				cellText := tableProject.GetCell(rowIndex, 0).Text
 				if strings.Contains(cellText, project.Name) {
 					tui.currentProjectID = string(project.ID)
+					tui.currentProjectName = project.Name
 					tui.currentViewLock.Lock()
 					tui.currentView = viewProject
 					tui.currentViewLock.Unlock()
@@ -369,7 +381,7 @@ func NewTui(logger *slog.Logger) *Tui {
 				}
 			}
 			tui.tableProjectDataLock.RUnlock()
-			// Reset container search when entering container list
+			// Reset container filter when entering container list
 			tui.containerSearchQuery = ""
 			tui.containerSearchInput.SetText("")
 			tui.tableContainer.Clear()
@@ -615,7 +627,7 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.currentView = viewProjectList
 			tui.currentViewLock.Unlock()
 			tui.currentContainerID = ""
-			// Reset container search when leaving
+			// Reset container filter when leaving
 			tui.containerSearchQuery = ""
 			tui.containerSearchInput.SetText("")
 			// Reset refresh pause when leaving view
@@ -698,9 +710,25 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.updateHeader()
 		}
 
-		if event.Rune() == 'f' {
+		if event.Rune() == '/' {
 			tui.logLayout.AddItem(tui.logFilterInput, 1, 0, true)
 			tui.app.SetFocus(tui.logFilterInput)
+		}
+
+		if event.Rune() == 'c' {
+			// Clear filter with 'c' key
+			tui.logFilterLock.Lock()
+			if tui.logFilter != "" {
+				tui.logFilter = ""
+				tui.logFilterLock.Unlock()
+				tui.logFilterInput.SetText("")
+				tui.logLayout.RemoveItem(tui.logFilterInput)
+				tui.drawContainerLog()
+				// Update header immediately to show filter was cleared
+				tui.updateHeader()
+			} else {
+				tui.logFilterLock.Unlock()
+			}
 		}
 
 		if event.Rune() == 't' {
@@ -788,7 +816,7 @@ func NewTui(logger *slog.Logger) *Tui {
 
 	projectSearchInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEsc {
-			// ESC: Clear filter and exit search
+			// ESC: Clear filter and exit filter mode
 			tui.projectSearchActive = false
 			tui.projectSearchQuery = ""
 			tui.projectSearchInput.SetText("")
@@ -796,7 +824,7 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.app.SetFocus(tui.tableProject)
 			tui.drawProjects()
 		} else if key == tcell.KeyEnter {
-			// Enter: Keep filter and exit search
+			// Enter: Keep filter and exit filter mode
 			tui.projectSearchActive = false
 			tui.projectLayout.RemoveItem(tui.projectSearchInput)
 			tui.app.SetFocus(tui.tableProject)
@@ -810,7 +838,7 @@ func NewTui(logger *slog.Logger) *Tui {
 
 	containerSearchInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEsc {
-			// ESC: Clear filter and exit search
+			// ESC: Clear filter and exit filter mode
 			tui.containerSearchActive = false
 			tui.containerSearchQuery = ""
 			tui.containerSearchInput.SetText("")
@@ -818,7 +846,7 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.app.SetFocus(tui.tableContainer)
 			tui.drawContainers()
 		} else if key == tcell.KeyEnter {
-			// Enter: Keep filter and exit search
+			// Enter: Keep filter and exit filter mode
 			tui.containerSearchActive = false
 			tui.containerLayout.RemoveItem(tui.containerSearchInput)
 			tui.app.SetFocus(tui.tableContainer)
@@ -885,17 +913,37 @@ func (t *Tui) RenderContainerHeader(project string) {
 	memIndicator := t.getSortIndicator(t.containerSortColumn == containerSortMemory, t.containerSortAsc)
 	statusIndicator := t.getSortIndicator(t.containerSortColumn == containerSortStatus, t.containerSortAsc)
 
+	// Calculate dynamic widths based on screen size
+	_, _, w, _ := t.tableContainer.GetInnerRect()
+	statusMaxWidth := t.calculateStatusWidth(w)
+
+	// Create or update header cells
 	t.tableContainer.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("[cyan::b]NAME%s[-::-]", nameIndicator)).SetAlign(tview.AlignLeft).SetExpansion(3).SetSelectable(false))
-	t.tableContainer.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]STATUS%s[-::-]", statusIndicator)).SetAlign(tview.AlignLeft).SetExpansion(1).SetSelectable(false))
+	t.tableContainer.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]STATUS%s[-::-]", statusIndicator)).SetAlign(tview.AlignLeft).SetExpansion(0).SetMaxWidth(statusMaxWidth).SetSelectable(false))
 	t.tableContainer.SetCell(0, 2, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
 	t.tableContainer.SetCell(0, 3, tview.NewTableCell(fmt.Sprintf("[cyan::b]MEM%s[-::-]", memIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
 	t.tableContainer.SetFixed(1, 0)
 }
 
+func (t *Tui) calculateStatusWidth(tableWidth int) int {
+	// Minimum space needed for other columns: NAME(20) + CPU(7) + MEM(7) = 44
+	minOtherWidth := 44
+	availableForStatus := tableWidth - minOtherWidth
+
+	// If space is tight, STATUS gets squeezed first
+	if availableForStatus < 4 {
+		return 4 // Absolute minimum to show something like "run…"
+	}
+	if availableForStatus < 12 {
+		return availableForStatus
+	}
+	return 12 // Max width for STATUS
+}
+
 func (t *Tui) drawProjects() {
 	projects := slices.Collect(maps.Values(t.tableProjectData))
 
-	// Filter projects if search is active
+	// Filter projects if filter is active
 	if t.projectSearchQuery != "" {
 		filtered := make([]dto.Project, 0)
 		for _, project := range projects {
@@ -1041,7 +1089,7 @@ func (t *Tui) drawContainers() {
 			continue
 		}
 
-		// Filter containers if search is active (fuzzy match)
+		// Filter containers if filter is active (fuzzy match)
 		if t.containerSearchQuery != "" {
 			if !fuzzyMatch(container.Service, t.containerSearchQuery) {
 				continue
@@ -1057,27 +1105,7 @@ func (t *Tui) drawContainers() {
 		}
 		t.tableContainer.SetCell(index, 0, tview.NewTableCell(serviceName))
 
-		// Column 1: CPU
-		t.tableContainer.SetCell(
-			index,
-			2,
-			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", container.CPUPercentage),
-			).
-				SetAlign(tview.AlignRight),
-		)
-
-		// Column 2: Memory
-		t.tableContainer.SetCell(
-			index,
-			3,
-			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", container.MemoryPercentage),
-			).
-				SetAlign(tview.AlignRight),
-		)
-
-		// Column 3: Status with color
+		// Column 1: Status with color
 		statusText := container.Status
 		if statusText == "" {
 			statusText = "unknown"
@@ -1107,10 +1135,15 @@ func (t *Tui) drawContainers() {
 			statusColor = "fuchsia"
 		}
 
-		// Pad to fixed width (10 chars = max length of "restarting")
-		const statusWidth = 10
-		for len(displayText) < statusWidth {
-			displayText += " "
+		// Truncate status text if needed based on available screen width
+		maxWidth := int(t.currentStatusMaxWidth.Load())
+		if len(displayText) > maxWidth {
+			// Truncate and add ellipsis if needed
+			if maxWidth > 3 {
+				displayText = displayText[:maxWidth-1] + "…"
+			} else {
+				displayText = "…"
+			}
 		}
 
 		t.tableContainer.SetCell(
@@ -1118,6 +1151,26 @@ func (t *Tui) drawContainers() {
 			1,
 			tview.NewTableCell(fmt.Sprintf("[%s]%s[-]", statusColor, displayText)).
 				SetAlign(tview.AlignLeft),
+		)
+
+		// Column 2: CPU
+		t.tableContainer.SetCell(
+			index,
+			2,
+			tview.NewTableCell(
+				fmt.Sprintf("%.2f%%", container.CPUPercentage),
+			).
+				SetAlign(tview.AlignRight),
+		)
+
+		// Column 3: Memory
+		t.tableContainer.SetCell(
+			index,
+			3,
+			tview.NewTableCell(
+				fmt.Sprintf("%.2f%%", container.MemoryPercentage),
+			).
+				SetAlign(tview.AlignRight),
 		)
 	}
 
