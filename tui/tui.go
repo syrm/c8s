@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"os/exec"
 	"slices"
 	"sort"
 	"strings"
@@ -220,7 +221,7 @@ func NewTui(logger *slog.Logger) *Tui {
     Enter / Right    View container logs           Esc / Left    Back to projects
     /                Search containers             c              Clear search filter
     Up / Down        Navigate (pauses 5s)          h              Show this help
-    Shift+N/C/M      Sort by Name/CPU/Mem
+    Shift+N/C/M      Sort by Name/CPU/Mem          s              Open shell
 
   [cyan]Container logs:[-]
     Esc / Left       Back to containers            p    Pause/unpause logs
@@ -421,6 +422,34 @@ func NewTui(logger *slog.Logger) *Tui {
 		if r == 'h' {
 			tui.pages.ShowPage("help")
 			tui.app.SetFocus(tui.helpTextView)
+			return nil
+		}
+
+		if r == 's' {
+			// Open shell on selected container
+			rowIndex, _ := tui.tableContainer.GetSelection()
+			if rowIndex > 0 {
+				tui.tableContainerDataLock.RLock()
+				var selectedContainer *dto.Container
+				for _, container := range tui.tableContainerData {
+					cellText := tui.tableContainer.GetCell(rowIndex, 0).Text
+					if strings.Contains(cellText, container.Service) && container.IsRunning {
+						selectedContainer = &container
+						break
+					}
+				}
+				tui.tableContainerDataLock.RUnlock()
+
+				if selectedContainer != nil {
+					tui.app.Suspend(func() {
+						cmd := exec.Command("docker", "exec", "-it", string(selectedContainer.ID), "/bin/sh")
+						cmd.Stdin = os.Stdin
+						cmd.Stdout = os.Stdout
+						cmd.Stderr = os.Stderr
+						_ = cmd.Run()
+					})
+				}
+			}
 			return nil
 		}
 
