@@ -126,9 +126,10 @@ type Tui struct {
 	projectSortAsc             bool
 	containerSortColumn        containerSortColumn
 	containerSortAsc           bool
-	currentProjectName         string
-	currentStatusMaxWidth      atomic.Int32
-	containerDisappeared       bool
+	currentProjectName        string
+	currentStatusMaxWidth     atomic.Int32
+	currentTableWidth         atomic.Int32
+	containerDisappeared      bool
 	containerDisappearedLock   sync.RWMutex
 	containerDisappearedModal  *tview.Modal
 	helpModal                  *tview.Grid
@@ -313,15 +314,12 @@ func NewTui(logger *slog.Logger) *Tui {
 
 	// Hook to update column widths on resize
 	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
-		tui.currentViewLock.RLock()
-		cv := tui.currentView
-		tui.currentViewLock.RUnlock()
-
-		if cv == viewProject {
-			// Get current screen width and calculate status max width
-			_, _, w, _ := tui.tableContainer.GetInnerRect()
-			tui.currentStatusMaxWidth.Store(int32(tui.calculateStatusWidth(w)))
-		}
+		// Get screen size and calculate approximate table width
+		// Table width is screen width minus borders (2 chars)
+		screenWidth, _ := screen.Size()
+		tableWidth := screenWidth - 2
+		tui.currentTableWidth.Store(int32(tableWidth))
+		tui.currentStatusMaxWidth.Store(int32(tui.calculateStatusWidth(tableWidth)))
 		return false
 	})
 
@@ -913,8 +911,8 @@ func (t *Tui) RenderContainerHeader(project string) {
 	memIndicator := t.getSortIndicator(t.containerSortColumn == containerSortMemory, t.containerSortAsc)
 	statusIndicator := t.getSortIndicator(t.containerSortColumn == containerSortStatus, t.containerSortAsc)
 
-	// Calculate dynamic widths based on screen size
-	_, _, w, _ := t.tableContainer.GetInnerRect()
+	// Use stored width from BeforeDrawFunc to get current value
+	w := int(t.currentTableWidth.Load())
 	statusMaxWidth := t.calculateStatusWidth(w)
 
 	// Create or update header cells
@@ -1136,6 +1134,7 @@ func (t *Tui) drawContainers() {
 		}
 
 		// Truncate status text if needed based on available screen width
+		// Use stored width from BeforeDrawFunc to get current value
 		maxWidth := int(t.currentStatusMaxWidth.Load())
 		if len(displayText) > maxWidth {
 			// Truncate and add ellipsis if needed
