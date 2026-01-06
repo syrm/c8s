@@ -21,7 +21,8 @@ type Container struct {
 	CPUPercentage       float64
 	MemoryPercentage    float64
 	Logs                []string
-	IsRunning           bool
+	Status              string
+	PendingAction       string // "starting", "stopping", "restarting", "removing" or ""
 	LogCollectionActive bool
 	Command             chan ContainerCommand
 	cancel              context.CancelFunc
@@ -35,7 +36,8 @@ type ContainerResponse struct {
 	Name             string
 	CPUPercentage    float64
 	MemoryPercentage float64
-	IsRunning        bool
+	Status           string
+	PendingAction    string
 }
 
 type ContainerCommand struct {
@@ -52,6 +54,12 @@ func NewContainer(
 ) *Container {
 	ctx, cancel := context.WithCancel(ctx)
 
+	status := dockerContainer.State
+	// Derive status from action if State is empty (for events)
+	if status == "" {
+		status = statusFromAction(action)
+	}
+
 	c := &Container{
 		ID:      ContainerID(dockerContainer.ID),
 		Service: dockerContainer.Labels["com.docker.compose.service"],
@@ -60,12 +68,7 @@ func NewContainer(
 		Project: project,
 		cancel:  cancel,
 		logger:  logger,
-	}
-
-	isRunning, err := isRunningFromAction(action)
-
-	if err == nil {
-		c.IsRunning = isRunning
+		Status:  status,
 	}
 
 	go c.handleCommands(ctx)
@@ -91,7 +94,8 @@ func (c *Container) handleCommands(ctx context.Context) {
 					Service:          c.Service,
 					CPUPercentage:    c.CPUPercentage,
 					MemoryPercentage: c.MemoryPercentage,
-					IsRunning:        c.IsRunning,
+					Status:           c.Status,
+					PendingAction:    c.PendingAction,
 				}
 			}
 		}
@@ -113,18 +117,33 @@ func (c *Container) Delete() {
 	c.Logs = nil // Clear logs to free memory
 }
 
-func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
-	c.IsRunning = containerState == apiContainer.StateRunning
+func (c *Container) SetStatusFromAction(action events.Action) {
+	c.Status = statusFromAction(action)
+	// Clear pending action when status actually changes
+	c.PendingAction = ""
 }
 
-func (c *Container) SetRunningStateFromAction(action events.Action) {
-	isRunning, err := isRunningFromAction(action)
+func (c *Container) SetPendingAction(action string) {
+	c.PendingAction = action
+}
 
-	if err != nil {
-		return
+func statusFromAction(action events.Action) string {
+	switch action {
+	case events.ActionStart, events.ActionUnPause, events.ActionReload:
+		return "running"
+	case events.ActionStop, events.ActionDie, events.ActionKill, events.ActionOOM:
+		return "exited"
+	case events.ActionPause:
+		return "paused"
+	case events.ActionRestart:
+		return "restarting"
+	case events.ActionCreate:
+		return "created"
+	case events.ActionRemove, events.ActionDelete, events.ActionDestroy:
+		return "removing"
+	default:
+		return "unknown"
 	}
-
-	c.IsRunning = isRunning
 }
 
 func isRunningFromAction(action events.Action) (bool, error) {

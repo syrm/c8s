@@ -43,6 +43,7 @@ const (
 	containerSortName containerSortColumn = iota
 	containerSortCPU
 	containerSortMemory
+	containerSortStatus
 )
 
 type RequestData interface {
@@ -68,6 +69,14 @@ type RequestProject struct {
 }
 
 func (p *RequestProject) isRequestData() {}
+
+type RequestSetPendingAction struct {
+	ContainerID   dto.ContainerID
+	PendingAction string
+	Response      chan bool
+}
+
+func (p *RequestSetPendingAction) isRequestData() {}
 
 type Tui struct {
 	app                        *tview.Application
@@ -168,7 +177,6 @@ func NewTui(logger *slog.Logger) *Tui {
 	tableContainer.SetBorder(true).SetBorderColor(tcell.ColorNavy)
 	tableContainer.SetSelectedStyle(tcell.StyleDefault.
 		Background(tcell.ColorNavy).
-		Foreground(tcell.ColorBlack).
 		Bold(true))
 
 	containerSearchInput := tview.NewInputField()
@@ -221,7 +229,9 @@ func NewTui(logger *slog.Logger) *Tui {
     Enter / Right    View container logs           Esc / Left    Back to projects
     /                Search containers             c              Clear search filter
     Up / Down        Navigate (pauses 5s)          h              Show this help
-    Shift+N/C/M      Sort by Name/CPU/Mem          s              Open shell
+    Shift+N/C/M/S    Sort by Name/CPU/Mem/Stat     s              Open shell
+    x                Stop container                r              Start/Restart
+    d                Remove container (stopped only)
 
   [cyan]Container logs:[-]
     Esc / Left       Back to containers            p    Pause/unpause logs
@@ -391,7 +401,7 @@ func NewTui(logger *slog.Logger) *Tui {
 	tableContainer.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		r := event.Rune()
 
-		// Sort by column (Shift+N=Name, Shift+C=CPU, Shift+M=Memory)
+		// Sort by column (Shift+N=Name, Shift+C=CPU, Shift+M=Memory, Shift+S=Status)
 		switch r {
 		case 'N':
 			tui.setContainerSort(containerSortName)
@@ -401,6 +411,9 @@ func NewTui(logger *slog.Logger) *Tui {
 			return nil
 		case 'M':
 			tui.setContainerSort(containerSortMemory)
+			return nil
+		case 'S':
+			tui.setContainerSort(containerSortStatus)
 			return nil
 		}
 
@@ -433,7 +446,7 @@ func NewTui(logger *slog.Logger) *Tui {
 				var selectedContainer *dto.Container
 				for _, container := range tui.tableContainerData {
 					cellText := tui.tableContainer.GetCell(rowIndex, 0).Text
-					if strings.Contains(cellText, container.Service) && container.IsRunning {
+					if strings.Contains(cellText, container.Service) && container.Status == "running" {
 						selectedContainer = &container
 						break
 					}
@@ -448,6 +461,149 @@ func NewTui(logger *slog.Logger) *Tui {
 						cmd.Stderr = os.Stderr
 						_ = cmd.Run()
 					})
+				}
+			}
+			return nil
+		}
+
+		// x: Stop container
+		if r == 'x' {
+			rowIndex, _ := tui.tableContainer.GetSelection()
+			if rowIndex > 0 {
+				tui.tableContainerDataLock.RLock()
+				var selectedContainer *dto.Container
+				for _, container := range tui.tableContainerData {
+					cellText := tui.tableContainer.GetCell(rowIndex, 0).Text
+					if strings.Contains(cellText, container.Service) && container.Status == "running" {
+						c := container
+						selectedContainer = &c
+						break
+					}
+				}
+				tui.tableContainerDataLock.RUnlock()
+
+				if selectedContainer != nil {
+					// Set pending action
+					response := make(chan bool)
+					tui.requestData <- &RequestSetPendingAction{
+						ContainerID:   selectedContainer.ID,
+						PendingAction: "stopping",
+						Response:      response,
+					}
+					<-response
+
+					// Update local cache immediately
+					tui.tableContainerDataLock.Lock()
+					if c, ok := tui.tableContainerData[selectedContainer.ID]; ok {
+						c.PendingAction = "stopping"
+						tui.tableContainerData[selectedContainer.ID] = c
+					}
+					tui.tableContainerDataLock.Unlock()
+					tui.drawContainers()
+
+					go func() {
+						cmd := exec.Command("docker", "stop", string(selectedContainer.ID))
+						_ = cmd.Run()
+					}()
+				}
+			}
+			return nil
+		}
+
+		// r: Start/Restart container
+		if r == 'r' {
+			rowIndex, _ := tui.tableContainer.GetSelection()
+			if rowIndex > 0 {
+				tui.tableContainerDataLock.RLock()
+				var selectedContainer *dto.Container
+				for _, container := range tui.tableContainerData {
+					cellText := tui.tableContainer.GetCell(rowIndex, 0).Text
+					if strings.Contains(cellText, container.Service) {
+						c := container
+						selectedContainer = &c
+						break
+					}
+				}
+				tui.tableContainerDataLock.RUnlock()
+
+				if selectedContainer != nil {
+					// Set pending action
+					response := make(chan bool)
+					var action string
+					if selectedContainer.Status == "running" {
+						action = "restarting"
+					} else {
+						action = "starting"
+					}
+					tui.requestData <- &RequestSetPendingAction{
+						ContainerID:   selectedContainer.ID,
+						PendingAction: action,
+						Response:      response,
+					}
+					<-response
+
+					// Update local cache immediately
+					tui.tableContainerDataLock.Lock()
+					if c, ok := tui.tableContainerData[selectedContainer.ID]; ok {
+						c.PendingAction = action
+						tui.tableContainerData[selectedContainer.ID] = c
+					}
+					tui.tableContainerDataLock.Unlock()
+					tui.drawContainers()
+
+					go func() {
+						if selectedContainer.Status == "running" {
+							cmd := exec.Command("docker", "restart", string(selectedContainer.ID))
+							_ = cmd.Run()
+						} else {
+							cmd := exec.Command("docker", "start", string(selectedContainer.ID))
+							_ = cmd.Run()
+						}
+					}()
+				}
+			}
+			return nil
+		}
+
+		// d: Remove container (stopped only)
+		if r == 'd' {
+			rowIndex, _ := tui.tableContainer.GetSelection()
+			if rowIndex > 0 {
+				tui.tableContainerDataLock.RLock()
+				var selectedContainer *dto.Container
+				for _, container := range tui.tableContainerData {
+					cellText := tui.tableContainer.GetCell(rowIndex, 0).Text
+					if strings.Contains(cellText, container.Service) && container.Status != "running" {
+						c := container
+						selectedContainer = &c
+						break
+					}
+				}
+				tui.tableContainerDataLock.RUnlock()
+
+				if selectedContainer != nil {
+					// Set pending action
+					response := make(chan bool)
+					tui.requestData <- &RequestSetPendingAction{
+						ContainerID:   selectedContainer.ID,
+						PendingAction: "removing",
+						Response:      response,
+					}
+					<-response
+
+					// Update local cache immediately
+					tui.tableContainerDataLock.Lock()
+					if c, ok := tui.tableContainerData[selectedContainer.ID]; ok {
+						c.PendingAction = "removing"
+						tui.tableContainerData[selectedContainer.ID] = c
+					}
+					tui.tableContainerDataLock.Unlock()
+					tui.drawContainers()
+
+					go func() {
+						cmd := exec.Command("docker", "rm", string(selectedContainer.ID))
+						_ = cmd.Run()
+					}()
 				}
 			}
 			return nil
@@ -727,10 +883,12 @@ func (t *Tui) RenderContainerHeader(project string) {
 	nameIndicator := t.getSortIndicator(t.containerSortColumn == containerSortName, t.containerSortAsc)
 	cpuIndicator := t.getSortIndicator(t.containerSortColumn == containerSortCPU, t.containerSortAsc)
 	memIndicator := t.getSortIndicator(t.containerSortColumn == containerSortMemory, t.containerSortAsc)
+	statusIndicator := t.getSortIndicator(t.containerSortColumn == containerSortStatus, t.containerSortAsc)
 
 	t.tableContainer.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("[cyan::b]NAME%s[-::-]", nameIndicator)).SetAlign(tview.AlignLeft).SetExpansion(3).SetSelectable(false))
-	t.tableContainer.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableContainer.SetCell(0, 2, tview.NewTableCell(fmt.Sprintf("[cyan::b]MEM%s[-::-]", memIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
+	t.tableContainer.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]STATUS%s[-::-]", statusIndicator)).SetAlign(tview.AlignLeft).SetExpansion(1).SetSelectable(false))
+	t.tableContainer.SetCell(0, 2, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
+	t.tableContainer.SetCell(0, 3, tview.NewTableCell(fmt.Sprintf("[cyan::b]MEM%s[-::-]", memIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
 	t.tableContainer.SetFixed(1, 0)
 }
 
@@ -854,6 +1012,8 @@ func (t *Tui) drawContainers() {
 			} else if a.MemoryPercentage > b.MemoryPercentage {
 				cmp = 1
 			}
+		case containerSortStatus:
+			cmp = strings.Compare(a.Status, b.Status)
 		}
 
 		// If ascending, keep order; if descending, reverse
@@ -890,13 +1050,8 @@ func (t *Tui) drawContainers() {
 
 		index += 1
 
-		// Column 0: Container service name with status and warning symbols
-		statusSymbol := "[green]●[-]"
-		if !container.IsRunning {
-			statusSymbol = "[gray]○[-]"
-		}
-
-		serviceName := statusSymbol + " " + container.Service
+		// Column 0: Container service name with warning symbol
+		serviceName := container.Service
 		if container.CPUPercentage > 80 || container.MemoryPercentage > 80 {
 			serviceName = "[yellow]⚠[-] " + serviceName
 		}
@@ -905,7 +1060,7 @@ func (t *Tui) drawContainers() {
 		// Column 1: CPU
 		t.tableContainer.SetCell(
 			index,
-			1,
+			2,
 			tview.NewTableCell(
 				fmt.Sprintf("%.2f%%", container.CPUPercentage),
 			).
@@ -915,11 +1070,54 @@ func (t *Tui) drawContainers() {
 		// Column 2: Memory
 		t.tableContainer.SetCell(
 			index,
-			2,
+			3,
 			tview.NewTableCell(
 				fmt.Sprintf("%.2f%%", container.MemoryPercentage),
 			).
 				SetAlign(tview.AlignRight),
+		)
+
+		// Column 3: Status with color
+		statusText := container.Status
+		if statusText == "" {
+			statusText = "unknown"
+		}
+
+		// Determine display text and color
+		displayText := statusText
+		var statusColor string
+		switch strings.ToLower(statusText) {
+		case "running":
+			statusColor = "green"
+		case "exited", "dead", "removing":
+			statusColor = "red"
+		case "paused":
+			statusColor = "yellow"
+		case "restarting":
+			statusColor = "fuchsia"
+		case "created":
+			statusColor = "cyan"
+		default:
+			statusColor = "gray"
+		}
+
+		// Show pending action with ellipsis character (single char … not three dots)
+		if container.PendingAction != "" {
+			displayText = container.PendingAction + "…"
+			statusColor = "fuchsia"
+		}
+
+		// Pad to fixed width (10 chars = max length of "restarting")
+		const statusWidth = 10
+		for len(displayText) < statusWidth {
+			displayText += " "
+		}
+
+		t.tableContainer.SetCell(
+			index,
+			1,
+			tview.NewTableCell(fmt.Sprintf("[%s]%s[-]", statusColor, displayText)).
+				SetAlign(tview.AlignLeft),
 		)
 	}
 
@@ -1261,9 +1459,9 @@ func (t *Tui) setContainerSort(col containerSortColumn) {
 		// Toggle direction if same column
 		t.containerSortAsc = !t.containerSortAsc
 	} else {
-		// New column: default to descending for metrics, ascending for name
+		// New column: default to descending for metrics, ascending for name and status
 		t.containerSortColumn = col
-		t.containerSortAsc = col == containerSortName
+		t.containerSortAsc = col == containerSortName || col == containerSortStatus
 	}
 	t.drawContainers()
 }

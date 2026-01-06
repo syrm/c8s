@@ -107,13 +107,17 @@ func (d *Docker) handleRequests(ctx context.Context) {
 					Name:             c.Name,
 					CPUPercentage:    c.CPUPercentage,
 					MemoryPercentage: c.MemoryPercentage,
-					IsRunning:        c.IsRunning,
+					Status:           c.Status,
+					PendingAction:    c.PendingAction,
 					Logs:             c.Logs,
 					LogCancel:        cancel,
 				}
 
 			case *tui.RequestProject:
 				d.handleRequestContainerProject(r)
+
+			case *tui.RequestSetPendingAction:
+				d.handleRequestSetPendingAction(r)
 
 			case *tui.RequestProjectList:
 				d.handleRequestProjectList(r)
@@ -166,13 +170,35 @@ func (d *Docker) handleRequestContainerProject(r *tui.RequestProject) {
 						Name:             container.Name,
 						CPUPercentage:    container.CPUPercentage,
 						MemoryPercentage: container.MemoryPercentage,
-						IsRunning:        container.IsRunning,
+						Status:           container.Status,
+						PendingAction:    container.PendingAction,
 					})
 				}
 			}
 
 			r.Response <- containers
 
+			return nil
+		},
+	}
+}
+
+func (d *Docker) handleRequestSetPendingAction(r *tui.RequestSetPendingAction) {
+	d.containersCommand <- ContainersCommand{
+		functor: func(docker *Docker) *Container {
+			c, ok := docker.containers[ContainerID(r.ContainerID)]
+			if !ok {
+				r.Response <- false
+				return nil
+			}
+
+			c.Command <- ContainerCommand{
+				functor: func(container *Container) {
+					container.SetPendingAction(r.PendingAction)
+				},
+			}
+
+			r.Response <- true
 			return nil
 		},
 	}
@@ -202,7 +228,7 @@ func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
 						Name:             container.Project.Name,
 						ContainersCPU:    make(map[dto.ContainerID]float64),
 						ContainersMemory: make(map[dto.ContainerID]float64),
-						ContainersState:  make(map[dto.ContainerID]bool),
+						ContainersState:  make(map[dto.ContainerID]string),
 					}
 				}
 
@@ -212,12 +238,12 @@ func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
 				project.ContainersMemory[dto.ContainerID(container.ID)] = container.MemoryPercentage
 
 				isRunning := 0
-				if container.IsRunning {
+				if container.Status == "running" {
 					isRunning = 1
 				}
 
 				project.ContainersRunning += isRunning
-				project.ContainersState[dto.ContainerID(container.ID)] = container.IsRunning
+				project.ContainersState[dto.ContainerID(container.ID)] = container.Status
 
 				projects[projectID] = project
 			}
@@ -362,12 +388,10 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 
-		d.containersCommand <- ContainersCommand{
-			functor: func(docker *Docker) *Container {
-				delete(docker.containers, c.ID)
-				c.Delete()
-
-				return nil
+		// Mark container as exited instead of deleting
+		c.Command <- ContainerCommand{
+			functor: func(container *Container) {
+				container.Status = "exited"
 			},
 		}
 
@@ -376,16 +400,13 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 
 	defer dockerContainerStats.Body.Close()
 	defer func() {
-		// Clean up container when stats streaming ends
-		d.containersCommand <- ContainersCommand{
-			functor: func(docker *Docker) *Container {
-				delete(docker.containers, c.ID)
-				c.Delete()
-
-				return nil
+		// Mark container as exited when stats streaming ends
+		c.Command <- ContainerCommand{
+			functor: func(container *Container) {
+				container.Status = "exited"
 			},
 		}
-		d.logger.DebugContext(ctx, "container removed after stats ended", slog.String("container_id", string(c.ID)))
+		d.logger.DebugContext(ctx, "container stopped (stats ended)", slog.String("container_id", string(c.ID)))
 	}()
 
 	dec := json.NewDecoder(dockerContainerStats.Body)
@@ -463,7 +484,7 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			if c != nil {
 				c.Command <- ContainerCommand{
 					functor: func(container *Container) {
-						container.SetRunningStateFromAction(msg.Action)
+						container.SetStatusFromAction(msg.Action)
 					},
 				}
 
@@ -476,6 +497,11 @@ func (d *Docker) handleEvents(ctx context.Context) {
 							return nil
 						},
 					}
+				}
+
+				// Restart stats streaming when container starts
+				if msg.Action == events.ActionStart || msg.Action == events.ActionUnPause {
+					go d.getContainerStatsRealtime(ctx, c)
 				}
 				continue
 			}

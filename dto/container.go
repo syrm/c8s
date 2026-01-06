@@ -16,7 +16,8 @@ type Container struct {
 	CPUPercentage    float64
 	MemoryPercentage float64
 	Logs             []string
-	IsRunning        bool
+	Status           string
+	PendingAction    string // "starting", "stopping", "restarting", "removing" or ""
 	LogCancel        context.CancelFunc
 }
 

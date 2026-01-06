@@ -10,5 +10,5 @@ type Project struct {
 	ContainersRunning int
 	ContainersCPU     map[ContainerID]float64
 	ContainersMemory  map[ContainerID]float64
-	ContainersState   map[ContainerID]bool
+	ContainersState   map[ContainerID]string
 }
