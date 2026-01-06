@@ -27,6 +27,23 @@ const (
 	viewContainerLog
 )
 
+type projectSortColumn int
+
+const (
+	projectSortName projectSortColumn = iota
+	projectSortCPU
+	projectSortMemory
+	projectSortContainers
+)
+
+type containerSortColumn int
+
+const (
+	containerSortName containerSortColumn = iota
+	containerSortCPU
+	containerSortMemory
+)
+
 type RequestData interface {
 	isRequestData()
 }
@@ -52,36 +69,64 @@ type RequestProject struct {
 func (p *RequestProject) isRequestData() {}
 
 type Tui struct {
-	app                    *tview.Application
-	tableProject           *tview.Table
-	tableProjectData       map[dto.ProjectID]dto.Project
-	tableProjectDataLock   sync.RWMutex
-	tableContainer         *tview.Table
-	tableContainerData     map[dto.ContainerID]dto.Container
-	tableContainerDataLock sync.RWMutex
-	containerLayout        *tview.Flex
-	statusBar              *tview.TextView
-	tableContainerLog      *tview.TextView
-	tableContainerLogData  []string
-	logPaused              bool
-	logPausedLock          sync.RWMutex
-	logShowTimestamp       bool
-	logShowTimestampLock   sync.RWMutex
-	logFilter              string
-	logFilterLock          sync.RWMutex
-	statusTimer            *time.Timer
-	logFilterInput         *tview.InputField
-	logLayout              *tview.Flex
-	currentView            currentView
-	currentViewLock        sync.RWMutex
-	currentProjectID       string
-	currentContainerID     string
-	currentContainerName   string
-	requestData            chan RequestData
-	logger                 *slog.Logger
+	app                        *tview.Application
+	pages                      *tview.Pages
+	tableProject               *tview.Table
+	tableProjectData           map[dto.ProjectID]dto.Project
+	tableProjectDataLock       sync.RWMutex
+	projectSearchInput         *tview.InputField
+	projectSearchActive        bool
+	projectSearchQuery         string
+	projectLayout              *tview.Flex
+	tableContainer             *tview.Table
+	tableContainerData         map[dto.ContainerID]dto.Container
+	tableContainerDataLock     sync.RWMutex
+	containerSearchInput       *tview.InputField
+	containerSearchActive      bool
+	containerSearchQuery       string
+	containerLayout            *tview.Flex
+	statusBar                  *tview.TextView
+	tableContainerLog          *tview.TextView
+	tableContainerLogData      []string
+	logPaused                  bool
+	logPausedLock              sync.RWMutex
+	logShowTimestamp           bool
+	logShowTimestampLock       sync.RWMutex
+	logFilter                  string
+	logFilterLock              sync.RWMutex
+	statusTimer                *time.Timer
+	logFilterInput             *tview.InputField
+	logLayout                  *tview.Flex
+	currentView                currentView
+	currentViewLock            sync.RWMutex
+	currentProjectID           string
+	currentContainerID         string
+	currentContainerName       string
+	currentContainerService    string
+	containerRefreshPaused     bool
+	containerRefreshPausedLock sync.RWMutex
+	containerRefreshTimer      *time.Timer
+	containerRefreshTimerLock  sync.Mutex
+	projectRefreshPaused       bool
+	projectRefreshPausedLock   sync.RWMutex
+	projectRefreshTimer        *time.Timer
+	projectRefreshTimerLock    sync.Mutex
+	projectSortColumn          projectSortColumn
+	projectSortAsc             bool
+	containerSortColumn        containerSortColumn
+	containerSortAsc           bool
+	containerDisappeared       bool
+	containerDisappearedLock   sync.RWMutex
+	containerDisappearedModal  *tview.Modal
+	helpModal                  *tview.Grid
+	helpTextView               *tview.TextView
+	headerView                 *tview.TextView
+	requestData                chan RequestData
+	logger                     *slog.Logger
 }
 
 func NewTui(logger *slog.Logger) *Tui {
+	// K9s-style borders
 	tview.Borders.HorizontalFocus = tview.BoxDrawingsLightHorizontal
 	tview.Borders.VerticalFocus = tview.BoxDrawingsLightVertical
 	tview.Borders.TopLeftFocus = tview.BoxDrawingsLightDownAndRight
@@ -89,57 +134,220 @@ func NewTui(logger *slog.Logger) *Tui {
 	tview.Borders.BottomLeftFocus = tview.BoxDrawingsLightUpAndRight
 	tview.Borders.BottomRightFocus = tview.BoxDrawingsLightUpAndLeft
 
+	// K9s color scheme
+	tview.Styles.PrimitiveBackgroundColor = tcell.ColorBlack
+	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
+	tview.Styles.MoreContrastBackgroundColor = tcell.ColorBlack
+	tview.Styles.BorderColor = tcell.ColorDarkCyan
+	tview.Styles.TitleColor = tcell.GetColor("cyan")
+	tview.Styles.GraphicsColor = tcell.GetColor("cyan")
+	tview.Styles.PrimaryTextColor = tcell.ColorWhite
+	tview.Styles.SecondaryTextColor = tcell.ColorLightGray
+	tview.Styles.TertiaryTextColor = tcell.ColorGray
+	tview.Styles.InverseTextColor = tcell.ColorBlack
+	tview.Styles.ContrastSecondaryTextColor = tcell.ColorDarkCyan
+
 	app := tview.NewApplication()
 
 	tableProject := tview.NewTable().SetSelectable(true, false)
-	tableProject.SetBorder(true)
+	tableProject.SetBorder(true).SetBorderColor(tcell.ColorNavy)
+	tableProject.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorNavy).
+		Foreground(tcell.ColorBlack).
+		Bold(true))
+
+	projectSearchInput := tview.NewInputField()
+	projectSearchInput.SetLabel("[cyan]Search: [-]")
+	projectSearchInput.SetFieldWidth(0)
+	projectSearchInput.SetFieldBackgroundColor(tcell.ColorBlack)
+	projectSearchInput.SetFieldTextColor(tcell.ColorWhite)
+	projectSearchInput.SetLabelColor(tcell.GetColor("cyan"))
 
 	tableContainer := tview.NewTable().SetSelectable(true, false)
-	tableContainer.SetBorder(true)
+	tableContainer.SetBorder(true).SetBorderColor(tcell.ColorNavy)
+	tableContainer.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorNavy).
+		Foreground(tcell.ColorBlack).
+		Bold(true))
+
+	containerSearchInput := tview.NewInputField()
+	containerSearchInput.SetLabel("[cyan]Search: [-]")
+	containerSearchInput.SetFieldWidth(0)
+	containerSearchInput.SetFieldBackgroundColor(tcell.ColorBlack)
+	containerSearchInput.SetFieldTextColor(tcell.ColorWhite)
+	containerSearchInput.SetLabelColor(tcell.GetColor("cyan"))
 
 	statusBar := tview.NewTextView()
 	statusBar.SetDynamicColors(true)
 	statusBar.SetTextAlign(tview.AlignCenter)
-
-	containerLayout := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(tableContainer, 0, 1, true)
+	statusBar.SetBackgroundColor(tcell.ColorBlack)
+	statusBar.SetTextColor(tcell.ColorWhite)
 
 	tableContainerLog := tview.NewTextView()
 	tableContainerLog.SetScrollable(true)
 	tableContainerLog.SetWordWrap(true)
-	tableContainerLog.SetBorder(true)
+	tableContainerLog.SetBorder(true).SetBorderColor(tcell.ColorNavy)
 	tableContainerLog.SetDynamicColors(true)
+	tableContainerLog.SetBackgroundColor(tcell.ColorBlack)
+	tableContainerLog.SetTextColor(tcell.ColorWhite)
 
 	logFilterInput := tview.NewInputField()
-	logFilterInput.SetLabel("Filter: ")
+	logFilterInput.SetLabel("[cyan]Filter: [-]")
 	logFilterInput.SetFieldWidth(0)
+	logFilterInput.SetFieldBackgroundColor(tcell.ColorBlack)
+	logFilterInput.SetFieldTextColor(tcell.ColorWhite)
+	logFilterInput.SetLabelColor(tcell.GetColor("cyan"))
+
+	containerDisappearedModal := tview.NewModal().
+		SetText("").
+		AddButtons([]string{"OK"}).
+		SetBackgroundColor(tcell.ColorBlack).
+		SetTextColor(tcell.ColorWhite).
+		SetButtonBackgroundColor(tcell.ColorDarkCyan).
+		SetButtonTextColor(tcell.ColorWhite).
+		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			// Will be set in tui struct
+		})
+
+	helpText := `                          [cyan::b]Keyboard Shortcuts[-::-]
+
+  [cyan]Projects list:[-]
+    Enter / Right    Enter project                 /    Search projects
+    c                Clear search filter           h    Show this help
+    1-4              Sort by column (toggle asc/desc)
+
+  [cyan]Containers list:[-]
+    Enter / Right    View container logs           Esc / Left    Back to projects
+    /                Search containers             c              Clear search filter
+    Up / Down        Navigate (pauses 5s)          h              Show this help
+    1-3              Sort by column (toggle asc/desc)
+
+  [cyan]Container logs:[-]
+    Esc / Left       Back to containers            p    Pause/unpause logs
+    f                Filter logs                   t    Toggle timestamps
+    h                Show this help
+
+
+                          [gray]Press Esc to close[-]`
+
+	helpTextView := tview.NewTextView()
+	helpTextView.SetText(helpText)
+	helpTextView.SetTextAlign(tview.AlignLeft)
+	helpTextView.SetDynamicColors(true)
+	helpTextView.SetBackgroundColor(tcell.ColorBlack)
+	helpTextView.SetBorder(true)
+	helpTextView.SetBorderColor(tcell.ColorDarkCyan)
+	helpTextView.SetBorderPadding(1, 1, 2, 2)
+
+	// Create a grid to center the help modal
+	helpModal := tview.NewGrid().
+		SetColumns(0, 82, 0).
+		SetRows(0, 18, 0).
+		AddItem(helpTextView, 1, 1, 1, 1, 0, 0, true)
+
+	// Create header view (k9s style - blue background)
+	headerView := tview.NewTextView()
+	headerView.SetDynamicColors(true)
+	headerView.SetBackgroundColor(tcell.ColorNavy)
+	headerView.SetTextAlign(tview.AlignLeft)
+	headerView.SetText(" [white::b]c8s[-::]")
+
+	// Create layouts with header (k9s style)
+	projectLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(headerView, 1, 0, false).
+		AddItem(tableProject, 0, 1, true)
+
+	containerLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(headerView, 1, 0, false).
+		AddItem(tableContainer, 0, 1, true)
 
 	logLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(headerView, 1, 0, false).
 		AddItem(tableContainerLog, 0, 1, true)
 
+	pages := tview.NewPages()
+
 	tui := &Tui{
-		app:                app,
-		logger:             logger,
-		tableProject:       tableProject,
-		tableProjectData:   make(map[dto.ProjectID]dto.Project),
-		tableContainer:     tableContainer,
-		tableContainerData: make(map[dto.ContainerID]dto.Container),
-		containerLayout:    containerLayout,
-		statusBar:          statusBar,
-		tableContainerLog:  tableContainerLog,
-		logFilterInput:     logFilterInput,
-		logLayout:          logLayout,
-		logShowTimestamp:   false,
-		requestData:        make(chan RequestData),
-		currentView:        viewProjectList,
+		app:                       app,
+		pages:                     pages,
+		logger:                    logger,
+		tableProject:              tableProject,
+		tableProjectData:          make(map[dto.ProjectID]dto.Project),
+		projectSearchInput:        projectSearchInput,
+		projectLayout:             projectLayout,
+		tableContainer:            tableContainer,
+		tableContainerData:        make(map[dto.ContainerID]dto.Container),
+		containerSearchInput:      containerSearchInput,
+		containerLayout:           containerLayout,
+		statusBar:                 statusBar,
+		tableContainerLog:         tableContainerLog,
+		logFilterInput:            logFilterInput,
+		logLayout:                 logLayout,
+		logShowTimestamp:          false,
+		containerDisappearedModal: containerDisappearedModal,
+		helpModal:                 helpModal,
+		helpTextView:              helpTextView,
+		headerView:                headerView,
+		requestData:               make(chan RequestData),
+		currentView:               viewProjectList,
+		projectSortColumn:         projectSortCPU,
+		projectSortAsc:            false,
+		containerSortColumn:       containerSortCPU,
+		containerSortAsc:          false,
 	}
 
+	// Add pages to the pages widget
+	pages.AddPage("projectList", projectLayout, true, true)
+	pages.AddPage("containerList", containerLayout, true, false)
+	pages.AddPage("logs", logLayout, true, false)
+	pages.AddPage("modal", containerDisappearedModal, false, false)
+	pages.AddPage("help", helpModal, true, false)
+
 	tableProject.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Rune() == '/' {
+			tui.projectSearchActive = true
+			tui.projectSearchInput.SetText(tui.projectSearchQuery) // Restore current filter
+			tui.projectLayout.AddItem(tui.projectSearchInput, 1, 0, true)
+			tui.app.SetFocus(tui.projectSearchInput)
+			return nil
+		}
+
+		if event.Rune() == 'c' && tui.projectSearchQuery != "" {
+			// Clear filter with 'c' key
+			tui.projectSearchQuery = ""
+			tui.drawProjects()
+			return nil
+		}
+
+		if event.Rune() == 'h' {
+			tui.pages.ShowPage("help")
+			tui.app.SetFocus(tui.helpTextView)
+			return nil
+		}
+
+		// Sort by column (1=Name, 2=CPU, 3=Memory, 4=Containers)
+		switch event.Rune() {
+		case '1':
+			tui.setProjectSort(projectSortName)
+			return nil
+		case '2':
+			tui.setProjectSort(projectSortCPU)
+			return nil
+		case '3':
+			tui.setProjectSort(projectSortMemory)
+			return nil
+		case '4':
+			tui.setProjectSort(projectSortContainers)
+			return nil
+		}
+
 		if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyRight {
 			rowIndex, _ := tableProject.GetSelection()
 			tui.tableProjectDataLock.RLock()
 			for _, project := range tui.tableProjectData {
-				if project.Name == tableProject.GetCell(rowIndex, 0).Text {
+				// Column 0 may contain warning symbol, so we check if the project name is in the cell text
+				cellText := tableProject.GetCell(rowIndex, 0).Text
+				if strings.Contains(cellText, project.Name) {
 					tui.currentProjectID = string(project.ID)
 					tui.currentViewLock.Lock()
 					tui.currentView = viewProject
@@ -148,39 +356,120 @@ func NewTui(logger *slog.Logger) *Tui {
 				}
 			}
 			tui.tableProjectDataLock.RUnlock()
+			// Reset container search when entering container list
+			tui.containerSearchQuery = ""
+			tui.containerSearchInput.SetText("")
 			tui.tableContainer.Clear()
 			tui.drawContainers()
-			tui.app.SetRoot(tui.containerLayout, true)
+			tui.pages.SwitchToPage("containerList")
+			// Reset project refresh pause when leaving view
+			tui.projectRefreshPausedLock.Lock()
+			tui.projectRefreshPaused = false
+			tui.projectRefreshPausedLock.Unlock()
+			tui.projectRefreshTimerLock.Lock()
+			if tui.projectRefreshTimer != nil {
+				tui.projectRefreshTimer.Stop()
+				tui.projectRefreshTimer = nil
+			}
+			tui.projectRefreshTimerLock.Unlock()
+			// Update header immediately after view change
+			tui.updateHeader()
+		}
+
+		// Pause refresh on navigation (Up/Down arrows)
+		if event.Key() == tcell.KeyUp || event.Key() == tcell.KeyDown {
+			tui.pauseProjectRefresh()
+			tui.updateHeader()
 		}
 
 		return event
 	})
 
 	tableContainer.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Rune() == '/' {
+			tui.containerSearchActive = true
+			tui.containerSearchInput.SetText(tui.containerSearchQuery) // Restore current filter
+			tui.containerLayout.AddItem(tui.containerSearchInput, 1, 0, true)
+			tui.app.SetFocus(tui.containerSearchInput)
+			return nil
+		}
+
+		if event.Rune() == 'c' && tui.containerSearchQuery != "" {
+			// Clear filter with 'c' key
+			tui.containerSearchQuery = ""
+			tui.drawContainers()
+			return nil
+		}
+
+		if event.Rune() == 'h' {
+			tui.pages.ShowPage("help")
+			tui.app.SetFocus(tui.helpTextView)
+			return nil
+		}
+
+		// Sort by column (1=Name, 2=CPU, 3=Memory)
+		switch event.Rune() {
+		case '1':
+			tui.setContainerSort(containerSortName)
+			return nil
+		case '2':
+			tui.setContainerSort(containerSortCPU)
+			return nil
+		case '3':
+			tui.setContainerSort(containerSortMemory)
+			return nil
+		}
+
 		if event.Key() == tcell.KeyEsc || event.Key() == tcell.KeyLeft {
-			tui.app.SetRoot(tui.tableProject, true)
+			tui.pages.SwitchToPage("projectList")
 			tui.currentViewLock.Lock()
 			tui.currentView = viewProjectList
 			tui.currentViewLock.Unlock()
 			tui.currentContainerID = ""
+			// Reset container search when leaving
+			tui.containerSearchQuery = ""
+			tui.containerSearchInput.SetText("")
+			// Reset refresh pause when leaving view
+			tui.containerRefreshPausedLock.Lock()
+			tui.containerRefreshPaused = false
+			tui.containerRefreshPausedLock.Unlock()
+			tui.containerRefreshTimerLock.Lock()
+			if tui.containerRefreshTimer != nil {
+				tui.containerRefreshTimer.Stop()
+				tui.containerRefreshTimer = nil
+			}
+			tui.containerRefreshTimerLock.Unlock()
+			// Update header immediately after view change
+			tui.updateHeader()
 		}
 
 		if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyRight {
 			rowIndex, _ := tableContainer.GetSelection()
 			tui.tableContainerDataLock.RLock()
 			for _, container := range tui.tableContainerData {
-				if container.Service == tableContainer.GetCell(rowIndex, 0).Text {
+				// Column 0 contains symbols + service name, so we check if the service name is in the cell text
+				cellText := tableContainer.GetCell(rowIndex, 0).Text
+				if strings.Contains(cellText, container.Service) {
 					tui.currentContainerID = string(container.ID)
 					tui.currentContainerName = container.Name
+					tui.currentContainerService = container.Service
 					break
 				}
 			}
 			tui.tableContainerDataLock.RUnlock()
 			tui.drawContainerLog()
-			tui.app.SetRoot(tui.logLayout, true)
+			tui.pages.SwitchToPage("logs")
 			tui.currentViewLock.Lock()
 			tui.currentView = viewContainerLog
 			tui.currentViewLock.Unlock()
+			// Update header immediately after view change
+			tui.updateHeader()
+		}
+
+		// Pause refresh on navigation (Up/Down arrows)
+		if event.Key() == tcell.KeyUp || event.Key() == tcell.KeyDown {
+			tui.pauseContainerRefresh()
+			tui.updateHeader()
 		}
 
 		return event
@@ -190,7 +479,7 @@ func NewTui(logger *slog.Logger) *Tui {
 		if event.Key() == tcell.KeyEsc || event.Key() == tcell.KeyLeft {
 			tui.tableContainer.Clear()
 			tui.drawContainers()
-			tui.app.SetRoot(tui.containerLayout, true)
+			tui.pages.SwitchToPage("containerList")
 			tui.currentViewLock.Lock()
 			tui.currentView = viewProject
 			tui.currentViewLock.Unlock()
@@ -204,6 +493,11 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.logFilterInput.SetText("")
 			tui.logLayout.RemoveItem(tui.logFilterInput)
 			tui.tableContainerLogData = nil // Clear logs to free memory
+			tui.containerDisappearedLock.Lock()
+			tui.containerDisappeared = false
+			tui.containerDisappearedLock.Unlock()
+			// Update header immediately after view change
+			tui.updateHeader()
 		}
 
 		if event.Rune() == 'p' {
@@ -211,6 +505,8 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.logPaused = !tui.logPaused
 			tui.logPausedLock.Unlock()
 			tui.drawContainerLog()
+			// Update header immediately to show pause status
+			tui.updateHeader()
 		}
 
 		if event.Rune() == 'f' {
@@ -223,6 +519,14 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.logShowTimestamp = !tui.logShowTimestamp
 			tui.logShowTimestampLock.Unlock()
 			tui.drawContainerLog()
+			// Update header immediately to show timestamp status
+			tui.updateHeader()
+		}
+
+		if event.Rune() == 'h' {
+			tui.pages.ShowPage("help")
+			tui.app.SetFocus(tui.helpTextView)
+			return nil
 		}
 
 		return event
@@ -236,6 +540,8 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.logLayout.RemoveItem(tui.logFilterInput)
 			tui.app.SetFocus(tui.tableContainerLog)
 			tui.drawContainerLog()
+			// Update header immediately to show filter status
+			tui.updateHeader()
 		}
 		if key == tcell.KeyEsc {
 			tui.logFilterLock.Lock()
@@ -245,65 +551,252 @@ func NewTui(logger *slog.Logger) *Tui {
 			tui.logLayout.RemoveItem(tui.logFilterInput)
 			tui.app.SetFocus(tui.tableContainerLog)
 			tui.drawContainerLog()
+			// Update header immediately to show filter status
+			tui.updateHeader()
+		}
+	})
+
+	containerDisappearedModal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+		tui.containerDisappearedLock.Lock()
+		tui.containerDisappeared = false
+		tui.containerDisappearedLock.Unlock()
+
+		tui.pages.HidePage("modal")
+		tui.tableContainer.Clear()
+		tui.drawContainers()
+		tui.pages.SwitchToPage("containerList")
+		tui.currentViewLock.Lock()
+		tui.currentView = viewProject
+		tui.currentViewLock.Unlock()
+		tui.currentContainerID = ""
+		tui.currentContainerName = ""
+		tui.currentContainerService = ""
+		tui.logPausedLock.Lock()
+		tui.logPaused = false
+		tui.logPausedLock.Unlock()
+		tui.logFilterLock.Lock()
+		tui.logFilter = ""
+		tui.logFilterLock.Unlock()
+		tui.logFilterInput.SetText("")
+		tui.logLayout.RemoveItem(tui.logFilterInput)
+		tui.tableContainerLogData = nil
+		// Update header immediately after view change
+		tui.updateHeader()
+	})
+
+	helpTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc || event.Rune() == 'q' {
+			tui.pages.HidePage("help")
+			return nil
+		}
+		return event
+	})
+
+	projectSearchInput.SetChangedFunc(func(text string) {
+		tui.projectSearchQuery = text
+		tui.drawProjects()
+	})
+
+	projectSearchInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEsc {
+			// ESC: Clear filter and exit search
+			tui.projectSearchActive = false
+			tui.projectSearchQuery = ""
+			tui.projectSearchInput.SetText("")
+			tui.projectLayout.RemoveItem(tui.projectSearchInput)
+			tui.app.SetFocus(tui.tableProject)
+			tui.drawProjects()
+		} else if key == tcell.KeyEnter {
+			// Enter: Keep filter and exit search
+			tui.projectSearchActive = false
+			tui.projectLayout.RemoveItem(tui.projectSearchInput)
+			tui.app.SetFocus(tui.tableProject)
+		}
+	})
+
+	containerSearchInput.SetChangedFunc(func(text string) {
+		tui.containerSearchQuery = text
+		tui.drawContainers()
+	})
+
+	containerSearchInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEsc {
+			// ESC: Clear filter and exit search
+			tui.containerSearchActive = false
+			tui.containerSearchQuery = ""
+			tui.containerSearchInput.SetText("")
+			tui.containerLayout.RemoveItem(tui.containerSearchInput)
+			tui.app.SetFocus(tui.tableContainer)
+			tui.drawContainers()
+		} else if key == tcell.KeyEnter {
+			// Enter: Keep filter and exit search
+			tui.containerSearchActive = false
+			tui.containerLayout.RemoveItem(tui.containerSearchInput)
+			tui.app.SetFocus(tui.tableContainer)
 		}
 	})
 
 	return tui
 }
 
+// fuzzyMatch checks if all characters in query appear in order in text
+// Example: "cr" matches "container" because 'c' and 'r' appear in order
+func fuzzyMatch(text, query string) bool {
+	if query == "" {
+		return true
+	}
+
+	textLower := strings.ToLower(text)
+	queryLower := strings.ToLower(query)
+
+	textIdx := 0
+	for _, queryChar := range queryLower {
+		found := false
+		for textIdx < len(textLower) {
+			if rune(textLower[textIdx]) == queryChar {
+				found = true
+				textIdx++
+				break
+			}
+			textIdx++
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *Tui) getSortIndicator(isActive bool, isAsc bool) string {
+	if !isActive {
+		return ""
+	}
+	if isAsc {
+		return "↑"
+	}
+	return "↓"
+}
+
 func (t *Tui) RenderProjectHeader() {
-	t.tableProject.SetCell(0, 0, tview.NewTableCell("[::b]Project").SetAlign(tview.AlignCenter).SetExpansion(3).SetSelectable(false))
-	t.tableProject.SetCell(0, 1, tview.NewTableCell("[::b]CPU").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableProject.SetCell(0, 2, tview.NewTableCell("[::b]Memory").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableProject.SetCell(0, 3, tview.NewTableCell("[::b]Cont.").SetAlign(tview.AlignRight).SetExpansion(2).SetSelectable(false))
+	nameIndicator := t.getSortIndicator(t.projectSortColumn == projectSortName, t.projectSortAsc)
+	cpuIndicator := t.getSortIndicator(t.projectSortColumn == projectSortCPU, t.projectSortAsc)
+	memIndicator := t.getSortIndicator(t.projectSortColumn == projectSortMemory, t.projectSortAsc)
+	contIndicator := t.getSortIndicator(t.projectSortColumn == projectSortContainers, t.projectSortAsc)
+
+	// Column 0: Project name
+	t.tableProject.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("[cyan::b]NAME%s[-::-]", nameIndicator)).SetAlign(tview.AlignLeft).SetExpansion(3).SetSelectable(false))
+	// Column 1: CPU
+	t.tableProject.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
+	// Column 2: Memory
+	t.tableProject.SetCell(0, 2, tview.NewTableCell(fmt.Sprintf("[cyan::b]MEM%s[-::-]", memIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
+	// Column 3: Container count
+	t.tableProject.SetCell(0, 3, tview.NewTableCell(fmt.Sprintf("[cyan::b]CONT%s[-::-]", contIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetSelectable(false))
 	t.tableProject.SetFixed(1, 0)
 }
 
 func (t *Tui) RenderContainerHeader(project string) {
-	t.tableContainer.SetCell(0, 0, tview.NewTableCell("[::b]"+project+" container").SetAlign(tview.AlignCenter).SetExpansion(2).SetSelectable(false))
-	t.tableContainer.SetCell(0, 1, tview.NewTableCell("[::b]CPU").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableContainer.SetCell(0, 2, tview.NewTableCell("[::b]Memory").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
+	nameIndicator := t.getSortIndicator(t.containerSortColumn == containerSortName, t.containerSortAsc)
+	cpuIndicator := t.getSortIndicator(t.containerSortColumn == containerSortCPU, t.containerSortAsc)
+	memIndicator := t.getSortIndicator(t.containerSortColumn == containerSortMemory, t.containerSortAsc)
+
+	// Column 0: Container/Service name
+	t.tableContainer.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("[cyan::b]NAME%s[-::-]", nameIndicator)).SetAlign(tview.AlignLeft).SetExpansion(3).SetSelectable(false))
+	// Column 1: CPU
+	t.tableContainer.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
+	// Column 2: Memory
+	t.tableContainer.SetCell(0, 2, tview.NewTableCell(fmt.Sprintf("[cyan::b]MEM%s[-::-]", memIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
 	t.tableContainer.SetFixed(1, 0)
 }
 
 func (t *Tui) drawProjects() {
 	projects := slices.Collect(maps.Values(t.tableProjectData))
 
+	// Filter projects if search is active
+	if t.projectSearchQuery != "" {
+		filtered := make([]dto.Project, 0)
+		for _, project := range projects {
+			if fuzzyMatch(project.Name, t.projectSearchQuery) {
+				filtered = append(filtered, project)
+			}
+		}
+		projects = filtered
+	}
+
 	slices.SortStableFunc(projects, func(a, b dto.Project) int {
-		if a.CPUPercentage < b.CPUPercentage {
-			return 1
+		var cmp int
+		switch t.projectSortColumn {
+		case projectSortName:
+			cmp = strings.Compare(a.Name, b.Name)
+		case projectSortCPU:
+			if a.CPUPercentage < b.CPUPercentage {
+				cmp = -1
+			} else if a.CPUPercentage > b.CPUPercentage {
+				cmp = 1
+			}
+		case projectSortMemory:
+			if a.MemoryPercentage < b.MemoryPercentage {
+				cmp = -1
+			} else if a.MemoryPercentage > b.MemoryPercentage {
+				cmp = 1
+			}
+		case projectSortContainers:
+			if a.ContainersRunning < b.ContainersRunning {
+				cmp = -1
+			} else if a.ContainersRunning > b.ContainersRunning {
+				cmp = 1
+			}
 		}
 
-		if a.CPUPercentage > b.CPUPercentage {
-			return -1
+		// If ascending, keep order; if descending, reverse
+		if !t.projectSortAsc {
+			cmp = -cmp
 		}
 
-		return strings.Compare(a.Name, b.Name)
+		// Secondary sort by name if primary comparison is equal
+		if cmp == 0 {
+			cmp = strings.Compare(a.Name, b.Name)
+		}
+
+		return cmp
 	})
 
 	t.tableProject.Clear()
 	t.RenderProjectHeader()
+
 	offset := 0
 	for index, project := range projects {
-		t.tableProject.SetCell(index+1+offset, 0, tview.NewTableCell(project.Name))
+		rowIndex := index + 1 + offset
+
+		// Column 0: Project name with warning symbol if needed
+		projectName := project.Name
+		if project.CPUPercentage > 80 || project.MemoryPercentage > 80 {
+			projectName = "[yellow]⚠[-] " + projectName
+		}
+		t.tableProject.SetCell(rowIndex, 0, tview.NewTableCell(projectName))
+
+		// Column 1: CPU
 		t.tableProject.SetCell(
-			index+1+offset,
+			rowIndex,
 			1,
 			tview.NewTableCell(
 				fmt.Sprintf("%.2f%%", max(0, project.CPUPercentage)),
 			).
 				SetAlign(tview.AlignRight),
 		)
+
+		// Column 2: Memory
 		t.tableProject.SetCell(
-			index+1+offset,
+			rowIndex,
 			2,
 			tview.NewTableCell(
 				fmt.Sprintf("%.2f%%", max(0, project.MemoryPercentage)),
 			).
 				SetAlign(tview.AlignRight),
 		)
+
+		// Column 3: Container count
 		t.tableProject.SetCell(
-			index+1+offset,
+			rowIndex,
 			3,
 			tview.NewTableCell(
 				fmt.Sprintf("%d/%d", project.ContainersRunning, len(project.ContainersState)),
@@ -311,20 +804,43 @@ func (t *Tui) drawProjects() {
 				SetAlign(tview.AlignRight),
 		)
 	}
+
+	// Update header to show current state
+	t.updateHeader()
 }
 
 func (t *Tui) drawContainers() {
 	t.tableContainerDataLock.RLock()
 	containers := slices.SortedStableFunc(maps.Values(t.tableContainerData), func(a, b dto.Container) int {
-		if a.CPUPercentage < b.CPUPercentage {
-			return 1
+		var cmp int
+		switch t.containerSortColumn {
+		case containerSortName:
+			cmp = strings.Compare(a.Service, b.Service)
+		case containerSortCPU:
+			if a.CPUPercentage < b.CPUPercentage {
+				cmp = -1
+			} else if a.CPUPercentage > b.CPUPercentage {
+				cmp = 1
+			}
+		case containerSortMemory:
+			if a.MemoryPercentage < b.MemoryPercentage {
+				cmp = -1
+			} else if a.MemoryPercentage > b.MemoryPercentage {
+				cmp = 1
+			}
 		}
 
-		if a.CPUPercentage > b.CPUPercentage {
-			return -1
+		// If ascending, keep order; if descending, reverse
+		if !t.containerSortAsc {
+			cmp = -cmp
 		}
 
-		return strings.Compare(a.Name, b.Name)
+		// Secondary sort by name if primary comparison is equal
+		if cmp == 0 {
+			cmp = strings.Compare(a.Service, b.Service)
+		}
+
+		return cmp
 	})
 	t.tableContainerDataLock.RUnlock()
 
@@ -332,14 +848,35 @@ func (t *Tui) drawContainers() {
 	t.tableProjectDataLock.RLock()
 	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(t.currentProjectID)].Name)
 	t.tableProjectDataLock.RUnlock()
+
 	index := 0
 	for _, container := range containers {
 		if string(container.Project.ID) != t.currentProjectID {
 			continue
 		}
+
+		// Filter containers if search is active (fuzzy match)
+		if t.containerSearchQuery != "" {
+			if !fuzzyMatch(container.Service, t.containerSearchQuery) {
+				continue
+			}
+		}
+
 		index += 1
 
-		t.tableContainer.SetCell(index, 0, tview.NewTableCell(container.Service))
+		// Column 0: Container service name with status and warning symbols
+		statusSymbol := "[green]●[-]"
+		if !container.IsRunning {
+			statusSymbol = "[gray]○[-]"
+		}
+
+		serviceName := statusSymbol + " " + container.Service
+		if container.CPUPercentage > 80 || container.MemoryPercentage > 80 {
+			serviceName = "[yellow]⚠[-] " + serviceName
+		}
+		t.tableContainer.SetCell(index, 0, tview.NewTableCell(serviceName))
+
+		// Column 1: CPU
 		t.tableContainer.SetCell(
 			index,
 			1,
@@ -348,6 +885,8 @@ func (t *Tui) drawContainers() {
 			).
 				SetAlign(tview.AlignRight),
 		)
+
+		// Column 2: Memory
 		t.tableContainer.SetCell(
 			index,
 			2,
@@ -357,14 +896,13 @@ func (t *Tui) drawContainers() {
 				SetAlign(tview.AlignRight),
 		)
 	}
+
+	// Update header to show current state
+	t.updateHeader()
 }
 
 func (t *Tui) drawContainerLog() {
 	t.tableContainerLog.Clear()
-
-	t.tableContainerDataLock.RLock()
-	container, ok := t.tableContainerData[dto.ContainerID(t.currentContainerID)]
-	t.tableContainerDataLock.RUnlock()
 
 	t.logPausedLock.RLock()
 	paused := t.logPaused
@@ -378,19 +916,17 @@ func (t *Tui) drawContainerLog() {
 	showTimestamp := t.logShowTimestamp
 	t.logShowTimestampLock.RUnlock()
 
-	if ok {
-		statusIndicators := ""
-		if paused {
-			statusIndicators += " [yellow](PAUSED)[-]"
-		}
-		if filter != "" {
-			statusIndicators += fmt.Sprintf(" [green](filter: %s)[-]", filter)
-		}
-		if showTimestamp {
-			statusIndicators += " [gray](time)[-]"
-		}
-		t.tableContainerLog.SetTitle(fmt.Sprintf(" [::b]%s logs (%s)%s ", container.Service, container.Name, statusIndicators))
+	statusIndicators := ""
+	if paused {
+		statusIndicators += " [yellow](PAUSED)[-]"
 	}
+	if filter != "" {
+		statusIndicators += fmt.Sprintf(" [green](filter: %s)[-]", filter)
+	}
+	if showTimestamp {
+		statusIndicators += " [gray](time)[-]"
+	}
+	t.tableContainerLog.SetTitle(fmt.Sprintf(" [::b]logs%s ", statusIndicators))
 
 	// Apply filter and colorize
 	var logs []string
@@ -407,6 +943,9 @@ func (t *Tui) drawContainerLog() {
 	if !paused {
 		t.tableContainerLog.ScrollToEnd()
 	}
+
+	// Update header to show current state
+	t.updateHeader()
 }
 
 func formatJSONLog(line string, showTimestamp bool) (string, bool) {
@@ -659,8 +1198,158 @@ func (t *Tui) showStatusMessage(message string) {
 	})
 }
 
+func (t *Tui) pauseContainerRefresh() {
+	t.containerRefreshPausedLock.Lock()
+	t.containerRefreshPaused = true
+	t.containerRefreshPausedLock.Unlock()
+
+	t.containerRefreshTimerLock.Lock()
+	// Cancel previous timer if exists
+	if t.containerRefreshTimer != nil {
+		t.containerRefreshTimer.Stop()
+	}
+
+	// Resume refresh after 5 seconds
+	t.containerRefreshTimer = time.AfterFunc(5*time.Second, func() {
+		t.containerRefreshPausedLock.Lock()
+		t.containerRefreshPaused = false
+		t.containerRefreshPausedLock.Unlock()
+	})
+	t.containerRefreshTimerLock.Unlock()
+}
+
+func (t *Tui) setProjectSort(col projectSortColumn) {
+	if t.projectSortColumn == col {
+		// Toggle direction if same column
+		t.projectSortAsc = !t.projectSortAsc
+	} else {
+		// New column: default to descending for metrics, ascending for name
+		t.projectSortColumn = col
+		t.projectSortAsc = col == projectSortName
+	}
+	t.drawProjects()
+}
+
+func (t *Tui) setContainerSort(col containerSortColumn) {
+	if t.containerSortColumn == col {
+		// Toggle direction if same column
+		t.containerSortAsc = !t.containerSortAsc
+	} else {
+		// New column: default to descending for metrics, ascending for name
+		t.containerSortColumn = col
+		t.containerSortAsc = col == containerSortName
+	}
+	t.drawContainers()
+}
+
+func (t *Tui) pauseProjectRefresh() {
+	t.projectRefreshPausedLock.Lock()
+	t.projectRefreshPaused = true
+	t.projectRefreshPausedLock.Unlock()
+
+	t.projectRefreshTimerLock.Lock()
+	// Cancel previous timer if exists
+	if t.projectRefreshTimer != nil {
+		t.projectRefreshTimer.Stop()
+	}
+
+	// Resume refresh after 5 seconds
+	t.projectRefreshTimer = time.AfterFunc(5*time.Second, func() {
+		t.projectRefreshPausedLock.Lock()
+		t.projectRefreshPaused = false
+		t.projectRefreshPausedLock.Unlock()
+	})
+	t.projectRefreshTimerLock.Unlock()
+}
+
 func (t *Tui) GetRequestData() <-chan RequestData {
 	return t.requestData
+}
+
+func (t *Tui) updateHeader() {
+	t.currentViewLock.RLock()
+	currentView := t.currentView
+	t.currentViewLock.RUnlock()
+
+	var text string
+	switch currentView {
+	case viewProjectList:
+		t.tableProjectDataLock.RLock()
+		count := len(t.tableProjectData)
+		t.tableProjectDataLock.RUnlock()
+
+		filter := ""
+		if t.projectSearchQuery != "" {
+			filter = fmt.Sprintf(" [yellow]| filter: %s[-]", t.projectSearchQuery)
+		}
+
+		t.projectRefreshPausedLock.RLock()
+		paused := ""
+		if t.projectRefreshPaused {
+			paused = " [yellow]| PAUSED[-]"
+		}
+		t.projectRefreshPausedLock.RUnlock()
+
+		text = fmt.Sprintf(" [black::b]c8s[-::] [black]|[-] Projects [%d]%s%s", count, filter, paused)
+
+	case viewProject:
+		t.tableContainerDataLock.RLock()
+		count := len(t.tableContainerData)
+		t.tableContainerDataLock.RUnlock()
+
+		projectName := "unknown"
+		if t.currentProjectID != "" {
+			t.tableProjectDataLock.RLock()
+			for _, project := range t.tableProjectData {
+				if string(project.ID) == t.currentProjectID {
+					projectName = project.Name
+					break
+				}
+			}
+			t.tableProjectDataLock.RUnlock()
+		}
+
+		filter := ""
+		if t.containerSearchQuery != "" {
+			filter = fmt.Sprintf(" [yellow]| filter: %s[-]", t.containerSearchQuery)
+		}
+
+		t.containerRefreshPausedLock.RLock()
+		paused := ""
+		if t.containerRefreshPaused {
+			paused = " [yellow]| PAUSED[-]"
+		}
+		t.containerRefreshPausedLock.RUnlock()
+
+		text = fmt.Sprintf(" [black::b]c8s[-::] [black]|[-] Containers [%d] [black]|[-] project: [black::b]%s[-::]%s%s",
+			count, projectName, filter, paused)
+
+	case viewContainerLog:
+		status := ""
+
+		t.logPausedLock.RLock()
+		if t.logPaused {
+			status += " [yellow]| PAUSED[-]"
+		}
+		t.logPausedLock.RUnlock()
+
+		t.logFilterLock.RLock()
+		if t.logFilter != "" {
+			status += fmt.Sprintf(" [yellow]| filter: %s[-]", t.logFilter)
+		}
+		t.logFilterLock.RUnlock()
+
+		t.logShowTimestampLock.RLock()
+		if t.logShowTimestamp {
+			status += " [yellow]| time[-]"
+		}
+		t.logShowTimestampLock.RUnlock()
+
+		text = fmt.Sprintf(" [black::b]c8s[-::] [black]|[-] Logs [black]|[-] container: [black::b]%s[-::]%s",
+			t.currentContainerService, status)
+	}
+
+	t.headerView.SetText(text)
 }
 
 func (t *Tui) getData(ctx context.Context) {
@@ -685,6 +1374,15 @@ func (t *Tui) getData(ctx context.Context) {
 					ctxCancel = nil
 				}
 
+				// Check if refresh is paused due to navigation
+				t.projectRefreshPausedLock.RLock()
+				paused := t.projectRefreshPaused
+				t.projectRefreshPausedLock.RUnlock()
+
+				if paused {
+					continue
+				}
+
 				response := make(chan []dto.Project)
 				t.requestData <- &RequestProjectList{
 					Response: response,
@@ -705,6 +1403,15 @@ func (t *Tui) getData(ctx context.Context) {
 				if ctxCancel != nil {
 					ctxCancel()
 					ctxCancel = nil
+				}
+
+				// Check if refresh is paused due to navigation
+				t.containerRefreshPausedLock.RLock()
+				paused := t.containerRefreshPaused
+				t.containerRefreshPausedLock.RUnlock()
+
+				if paused {
+					continue
 				}
 
 				response := make(chan []dto.Container)
@@ -734,7 +1441,113 @@ func (t *Tui) getData(ctx context.Context) {
 					continue
 				}
 
-				t.logger.DebugContext(ctx, "fetching logs for container", slog.String("container_id", t.currentContainerID))
+				// Check if container has disappeared
+				t.containerDisappearedLock.RLock()
+				disappeared := t.containerDisappeared
+				t.containerDisappearedLock.RUnlock()
+
+				if disappeared {
+					// If we haven't started log collection yet for the reappeared container
+					if ctxCancel == nil {
+						// Try to find a container with same service name and project
+						t.logger.InfoContext(ctx, "checking for container reappearance",
+							slog.String("service", t.currentContainerService),
+							slog.String("project", t.currentProjectID))
+
+						responseProject := make(chan []dto.Container)
+						t.requestData <- &RequestProject{
+							ProjectID: dto.ProjectID(t.currentProjectID),
+							Response:  responseProject,
+						}
+						containers := <-responseProject
+
+						var foundContainer *dto.Container
+						for _, container := range containers {
+							t.logger.InfoContext(ctx, "checking container",
+								slog.String("container_service", container.Service),
+								slog.String("looking_for", t.currentContainerService))
+							if container.Service == t.currentContainerService && string(container.Project.ID) == t.currentProjectID {
+								foundContainer = &container
+								break
+							}
+						}
+
+						if foundContainer != nil {
+							// Container reappeared! Start log collection ONCE
+							t.logger.InfoContext(ctx, "container reappeared, starting log collection",
+								slog.String("service", foundContainer.Service),
+								slog.String("new_id", string(foundContainer.ID)))
+
+							t.currentContainerID = string(foundContainer.ID)
+							t.currentContainerName = foundContainer.Name
+
+							// Start log collection for the new container
+							response := make(chan dto.Container)
+							t.requestData <- &RequestContainerLog{
+								ContainerID: dto.ContainerID(t.currentContainerID),
+								Response:    response,
+							}
+							c := <-response
+
+							if c.ID == "" {
+								// Still not available, keep waiting
+								t.logger.InfoContext(ctx, "container reappeared but logs not ready yet")
+								continue
+							}
+
+							// Got container, save LogCancel
+							ctxCancel = c.LogCancel
+							t.logger.InfoContext(ctx, "log collection started, waiting for logs...")
+						}
+
+						// Still disappeared or just started log collection, continue waiting
+						continue
+					}
+
+					// Log collection is running, check if we have logs now
+					response := make(chan dto.Container)
+					t.requestData <- &RequestContainerLog{
+						ContainerID: dto.ContainerID(t.currentContainerID),
+						Response:    response,
+					}
+					c := <-response
+
+					if c.ID == "" {
+						// Container disappeared again!
+						t.logger.InfoContext(ctx, "container disappeared again")
+						if ctxCancel != nil {
+							ctxCancel()
+							ctxCancel = nil
+						}
+						continue
+					}
+
+					// Wait until we have actual logs before hiding the modal
+					if len(c.Logs) == 0 {
+						t.logger.InfoContext(ctx, "still waiting for logs...")
+						continue
+					}
+
+					// We have logs! Update them and close the modal
+					t.logger.InfoContext(ctx, "got logs, closing modal", slog.Int("log_count", len(c.Logs)))
+
+					t.containerDisappearedLock.Lock()
+					t.containerDisappeared = false
+					t.containerDisappearedLock.Unlock()
+
+					// Update logs BEFORE queuing the draw
+					t.tableContainerLogData = c.Logs
+
+					t.app.QueueUpdateDraw(func() {
+						t.drawContainerLog()
+						t.pages.HidePage("modal")
+					})
+
+					// Continue to next cycle
+					continue
+				}
+
+				t.logger.InfoContext(ctx, "fetching logs for container", slog.String("container_id", t.currentContainerID))
 
 				// First time we enter this view, start the log collection
 				if ctxCancel == nil {
@@ -745,32 +1558,26 @@ func (t *Tui) getData(ctx context.Context) {
 					}
 					c := <-response
 					if c.ID == "" {
-						// Container no longer exists, go back to container list
+						// Container no longer exists, show modal
 						containerName := t.currentContainerName
 						containerID := t.currentContainerID
-						t.currentViewLock.Lock()
-						t.currentView = viewProject
-						t.currentViewLock.Unlock()
-						t.currentContainerID = ""
-						t.currentContainerName = ""
-						t.logFilterLock.Lock()
-						t.logFilter = ""
-						t.logFilterLock.Unlock()
-						t.logFilterInput.SetText("")
-						t.logLayout.RemoveItem(t.logFilterInput)
-						t.tableContainerLogData = nil // Clear logs to free memory
+
+						t.containerDisappearedLock.Lock()
+						t.containerDisappeared = true
+						t.containerDisappearedLock.Unlock()
+
 						t.app.QueueUpdateDraw(func() {
-							t.tableContainer.Clear()
-							t.drawContainers()
-							t.app.SetRoot(t.containerLayout, true)
-							t.showStatusMessage(fmt.Sprintf("Container %s (%s) no longer exists", containerName, containerID[:12]))
+							t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
+							t.pages.ShowPage("modal")
 						})
 						continue
 					}
 					ctxCancel = c.LogCancel
+					// Skip the immediate second request on first start
+					continue
 				}
 
-				// Always get the latest logs
+				// Get the latest logs (only when ctxCancel is already set)
 				response := make(chan dto.Container)
 				t.requestData <- &RequestContainerLog{
 					ContainerID: dto.ContainerID(t.currentContainerID),
@@ -780,34 +1587,30 @@ func (t *Tui) getData(ctx context.Context) {
 				c := <-response
 
 				if c.ID == "" {
-					// Container no longer exists, go back to container list
+					// Container no longer exists, show modal
 					if ctxCancel != nil {
 						ctxCancel()
 						ctxCancel = nil
 					}
+
 					containerName := t.currentContainerName
 					containerID := t.currentContainerID
-					t.currentViewLock.Lock()
-					t.currentView = viewProject
-					t.currentViewLock.Unlock()
-					t.currentContainerID = ""
-					t.currentContainerName = ""
-					t.logFilterLock.Lock()
-					t.logFilter = ""
-					t.logFilterLock.Unlock()
-					t.logFilterInput.SetText("")
-					t.logLayout.RemoveItem(t.logFilterInput)
-					t.tableContainerLogData = nil // Clear logs to free memory
+
+					t.containerDisappearedLock.Lock()
+					t.containerDisappeared = true
+					t.containerDisappearedLock.Unlock()
+
 					t.app.QueueUpdateDraw(func() {
-						t.tableContainer.Clear()
-						t.drawContainers()
-						t.app.SetRoot(t.containerLayout, true)
-						t.showStatusMessage(fmt.Sprintf("Container %s (%s) no longer exists", containerName, containerID[:12]))
+						t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
+						t.pages.ShowPage("modal")
 					})
 					continue
 				}
 
-				t.tableContainerLogData = c.Logs
+				// Only update logs if we have some (don't erase existing logs with empty array)
+				if len(c.Logs) > 0 {
+					t.tableContainerLogData = c.Logs
+				}
 
 				t.app.QueueUpdateDraw(func() {
 					t.drawContainerLog()
@@ -820,7 +1623,7 @@ func (t *Tui) getData(ctx context.Context) {
 func (t *Tui) Render(ctx context.Context) {
 	go t.getData(ctx)
 
-	if err := t.app.SetRoot(t.tableProject, true).EnableMouse(true).Run(); err != nil {
+	if err := t.app.SetRoot(t.pages, true).EnableMouse(true).Run(); err != nil {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
 		os.Exit(1)
 	}
