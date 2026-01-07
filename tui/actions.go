@@ -42,11 +42,11 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 		// Apply status filter
 		switch filter {
 		case filterRunning:
-			if container.Status != "running" {
+			if container.Status != dto.StatusRunning {
 				continue
 			}
 		case filterNotRunning:
-			if container.Status == "running" {
+			if container.Status == dto.StatusRunning {
 				continue
 			}
 		}
@@ -96,7 +96,7 @@ func (t *Tui) handleContainerShell() bool {
 
 	var shellErr error
 	t.app.Suspend(func() {
-		cmd := exec.Command("docker", "exec", "-it", string(container.ID), "/bin/sh")
+		cmd := exec.Command("docker", "exec", "-it", string(container.ID), defaultShell)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -143,7 +143,7 @@ func (t *Tui) handleContainerRestart() bool {
 	}
 
 	var action string
-	if container.Status == "running" {
+	if container.Status == dto.StatusRunning {
 		action = "restarting"
 	} else {
 		action = "starting"
@@ -155,7 +155,7 @@ func (t *Tui) handleContainerRestart() bool {
 
 	go func() {
 		var cmd *exec.Cmd
-		if container.Status == "running" {
+		if container.Status == dto.StatusRunning {
 			cmd = exec.Command("docker", "restart", string(container.ID))
 		} else {
 			cmd = exec.Command("docker", "start", string(container.ID))

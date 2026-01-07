@@ -1,7 +1,9 @@
 package dto
 
+// ProjectID is a unique identifier for a Docker Compose project.
 type ProjectID string
 
+// Project represents a Docker Compose project with aggregated container metrics.
 type Project struct {
 	ID                ProjectID
 	Name              string

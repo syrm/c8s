@@ -9,8 +9,20 @@ import (
 	"github.com/syrm/c8s/dto"
 )
 
+// Container status constants - re-exported from dto for convenience.
+const (
+	StatusRunning    = dto.StatusRunning
+	StatusExited     = dto.StatusExited
+	StatusPaused     = dto.StatusPaused
+	StatusRestarting = dto.StatusRestarting
+	StatusCreated    = dto.StatusCreated
+	StatusRemoving   = dto.StatusRemoving
+)
+
+// ContainerID is a unique identifier for a Docker container.
 type ContainerID string
 
+// Container represents a Docker container with its state and metrics.
 type Container struct {
 	ID                  ContainerID
 	Service             string
@@ -26,6 +38,7 @@ type Container struct {
 	cancel              context.CancelFunc
 }
 
+// ContainerResponse is a snapshot of container state sent through response channels.
 type ContainerResponse struct {
 	ID               ContainerID
 	Project          dto.ContainerProject
@@ -37,18 +50,22 @@ type ContainerResponse struct {
 	PendingAction    string
 }
 
+// ContainerCommand represents a command to be executed on a container.
+// It uses a functor pattern to serialize access to the container state.
 type ContainerCommand struct {
 	functor  func(*Container)
 	response chan ContainerResponse
 }
 
+// NewContainer creates a new Container from a Docker API container summary.
+// It starts a goroutine to handle commands for this container.
 func NewContainer(
 	ctx context.Context,
 	dockerContainer apiContainer.Summary,
 	action events.Action,
 	project dto.ContainerProject,
 ) *Container {
-	ctx, cancel := context.WithCancel(ctx)
+	childCtx, cancel := context.WithCancel(ctx)
 
 	status := dockerContainer.State
 	// Derive status from action if State is empty (for events)
@@ -58,7 +75,7 @@ func NewContainer(
 	// Default to "created" if status is still unknown
 	// (container must exist to receive events)
 	if status == "" {
-		status = "created"
+		status = StatusCreated
 	}
 
 	// Safely get container name
@@ -77,7 +94,7 @@ func NewContainer(
 		Status:  status,
 	}
 
-	go c.handleCommands(ctx)
+	go c.handleCommands(childCtx)
 
 	return c
 }
@@ -143,17 +160,17 @@ func (c *Container) SetPendingAction(action string) {
 func statusFromAction(action events.Action) string {
 	switch action {
 	case events.ActionStart, events.ActionUnPause, events.ActionReload:
-		return "running"
+		return StatusRunning
 	case events.ActionStop, events.ActionDie, events.ActionKill, events.ActionOOM:
-		return "exited"
+		return StatusExited
 	case events.ActionPause:
-		return "paused"
+		return StatusPaused
 	case events.ActionRestart:
-		return "restarting"
+		return StatusRestarting
 	case events.ActionCreate:
-		return "created"
+		return StatusCreated
 	case events.ActionRemove, events.ActionDelete, events.ActionDestroy:
-		return "removing"
+		return StatusRemoving
 	default:
 		// Unknown actions (exec_*, health_status, top, rename, etc.)
 		// should not change the container status

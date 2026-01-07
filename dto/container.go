@@ -2,8 +2,20 @@ package dto
 
 import "context"
 
+// Container status constants.
+const (
+	StatusRunning    = "running"
+	StatusExited     = "exited"
+	StatusPaused     = "paused"
+	StatusRestarting = "restarting"
+	StatusCreated    = "created"
+	StatusRemoving   = "removing"
+)
+
+// ContainerID is a unique identifier for a Docker container.
 type ContainerID string
 
+// Container represents a Docker container state as transferred between layers.
 type Container struct {
 	ID               ContainerID
 	Project          ContainerProject
@@ -17,6 +29,7 @@ type Container struct {
 	LogCancel        context.CancelFunc
 }
 
+// ContainerProject contains the project information for a container.
 type ContainerProject struct {
 	ID   ProjectID
 	Name string

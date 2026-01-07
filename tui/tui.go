@@ -252,7 +252,7 @@ func (t *Tui) RenderProjectHeader() {
 	t.tableProject.SetFixed(1, 0)
 }
 
-func (t *Tui) RenderContainerHeader(project string) {
+func (t *Tui) RenderContainerHeader() {
 	sortCol, sortAsc := t.getContainerSort()
 	nameIndicator := t.getSortIndicator(sortCol == containerSortName, sortAsc)
 	cpuIndicator := t.getSortIndicator(sortCol == containerSortCPU, sortAsc)
@@ -309,7 +309,7 @@ func (t *Tui) drawProjects() {
 
 		// Column 0: Project name with warning symbol if needed
 		projectName := project.Name
-		if project.CPUPercentage > 80 || project.MemoryPercentage > 80 {
+		if project.CPUPercentage > resourceWarningThreshold || project.MemoryPercentage > resourceWarningThreshold {
 			projectName = "[yellow]⚠[-] " + projectName
 		}
 		t.tableProject.SetCell(rowIndex, 0, tview.NewTableCell(projectName))
@@ -367,9 +367,7 @@ func (t *Tui) drawContainers() {
 	})
 
 	t.tableContainer.Clear()
-	t.tableProjectDataLock.RLock()
-	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(currentProjectID)].Name)
-	t.tableProjectDataLock.RUnlock()
+	t.RenderContainerHeader()
 
 	index := 0
 	for _, container := range containers {
@@ -387,7 +385,7 @@ func (t *Tui) drawContainers() {
 
 		// Column 0: Container service name with warning symbol
 		serviceName := container.Service
-		if container.CPUPercentage > 80 || container.MemoryPercentage > 80 {
+		if container.CPUPercentage > resourceWarningThreshold || container.MemoryPercentage > resourceWarningThreshold {
 			serviceName = "[yellow]⚠[-] " + serviceName
 		}
 		t.tableContainer.SetCell(index, 0, tview.NewTableCell(serviceName))
@@ -402,15 +400,15 @@ func (t *Tui) drawContainers() {
 		displayText := statusText
 		var statusColor string
 		switch strings.ToLower(statusText) {
-		case "running":
+		case dto.StatusRunning:
 			statusColor = "green"
-		case "exited", "dead", "removing":
+		case dto.StatusExited, "dead", dto.StatusRemoving:
 			statusColor = "red"
-		case "paused":
+		case dto.StatusPaused:
 			statusColor = "yellow"
-		case "restarting":
+		case dto.StatusRestarting:
 			statusColor = "fuchsia"
-		case "created":
+		case dto.StatusCreated:
 			statusColor = "cyan"
 		default:
 			statusColor = "gray"

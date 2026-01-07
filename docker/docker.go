@@ -23,11 +23,15 @@ import (
 	"github.com/syrm/c8s/dto"
 )
 
+// ContainersCommand represents a command to be executed on the containers map.
+// It uses a functor pattern to serialize access to the containers.
 type ContainersCommand struct {
 	functor  func(*Docker) *Container
 	response chan *Container
 }
 
+// Docker manages the connection to the Docker daemon and container monitoring.
+// It provides real-time statistics and log streaming for Docker Compose projects.
 type Docker struct {
 	client            *dockerClient.Client
 	containers        map[ContainerID]*Container
@@ -37,6 +41,8 @@ type Docker struct {
 	done              chan struct{} // Signals when Run() has completed
 }
 
+// NewDocker creates a new Docker client and initializes monitoring infrastructure.
+// It returns an error if the Docker client cannot be created.
 func NewDocker(
 	ctx context.Context,
 	requestData <-chan dto.RequestData,
@@ -44,14 +50,13 @@ func NewDocker(
 ) (*Docker, error) {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
-		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))
-		return nil, err
+		return nil, fmt.Errorf("creating docker client: %w", err)
 	}
 
 	return &Docker{
 		client:            cli,
-		// Pre-allocate map for typical Docker Compose setups (usually < 256 containers)
-		containers:        make(map[ContainerID]*Container, 256),
+		// Pre-allocate map for typical Docker Compose setups
+		containers:        make(map[ContainerID]*Container, initialContainerMapSize),
 		containersCommand: make(chan ContainersCommand),
 		requestData:       requestData,
 		logger:            logger,
@@ -122,6 +127,9 @@ func (d *Docker) handleRequests(ctx context.Context) {
 
 			case *dto.RequestProjectList:
 				d.handleRequestProjectList(ctx, r)
+
+			default:
+				d.logger.Warn("unknown request type", slog.String("type", fmt.Sprintf("%T", req)))
 			}
 		}
 	}
@@ -334,7 +342,7 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 				project.ContainersMemory[dto.ContainerID(container.ID)] = container.MemoryPercentage
 
 				isRunning := 0
-				if container.Status == "running" {
+				if container.Status == StatusRunning {
 					isRunning = 1
 				}
 
@@ -374,7 +382,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		}
 	}()
 
-	since := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
+	since := time.Now().Add(-logHistoryDuration).Format(time.RFC3339)
 	out, err := d.client.ContainerLogs(ctx, string(c.ID), apiContainer.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
@@ -393,13 +401,13 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	pr, pw := io.Pipe()
 
 	// Channel to receive lines from the reader goroutine
-	lines := make(chan string, 100)
+	lines := make(chan string, logLineBufferSize)
 
 	// Goroutine to handle stdcopy
 	go func() {
 		defer pw.Close()
 		_, err := stdcopy.StdCopy(pw, pw, out)
-		if err != nil && err != io.EOF {
+		if err != nil && !errors.Is(err, io.EOF) {
 			d.logger.DebugContext(ctx, "stdcopy finished", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 		}
 	}()
@@ -411,7 +419,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		for {
 			line, errReader := reader.ReadString('\n')
 			if errReader != nil {
-				if errReader != io.EOF {
+				if !errors.Is(errReader, io.EOF) {
 					d.logger.DebugContext(ctx, "end of container logs", slog.String("container_id", string(c.ID)), slog.Any("error", errReader))
 				}
 				return
@@ -455,8 +463,16 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	}
 }
 
-// dockerAPITimeout is the timeout for one-shot Docker API calls
-const dockerAPITimeout = 30 * time.Second
+const (
+	// dockerAPITimeout is the timeout for one-shot Docker API calls.
+	dockerAPITimeout = 30 * time.Second
+	// logHistoryDuration is how far back to fetch logs when starting collection.
+	logHistoryDuration = 1 * time.Hour
+	// logLineBufferSize is the buffer size for the log line channel.
+	logLineBufferSize = 100
+	// initialContainerMapSize is the initial capacity for the containers map.
+	initialContainerMapSize = 256
+)
 
 func (d *Docker) collectContainers(ctx context.Context) error {
 	listCtx, cancel := context.WithTimeout(ctx, dockerAPITimeout)
@@ -464,7 +480,7 @@ func (d *Docker) collectContainers(ctx context.Context) error {
 
 	dockerContainers, err := d.client.ContainerList(listCtx, apiContainer.ListOptions{All: true})
 	if err != nil {
-		return err
+		return fmt.Errorf("listing containers: %w", err)
 	}
 
 	d.logger.DebugContext(ctx, "CollectContainers started")
@@ -548,7 +564,7 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
-				container.Status = "exited"
+				container.Status = StatusExited
 			},
 		}:
 		case <-time.After(dto.ChannelTimeout):
@@ -565,7 +581,7 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
-				container.Status = "exited"
+				container.Status = StatusExited
 			},
 		}:
 		case <-time.After(dto.ChannelTimeout):
@@ -580,7 +596,7 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		var stats apiContainer.StatsResponse
 		errDecode := dec.Decode(&stats)
 		if errDecode != nil {
-			if errDecode != io.EOF && !errors.Is(errDecode, context.DeadlineExceeded) {
+			if !errors.Is(errDecode, io.EOF) && !errors.Is(errDecode, context.DeadlineExceeded) {
 				d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
 				break
 			}
