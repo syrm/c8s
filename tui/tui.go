@@ -191,19 +191,14 @@ func NewTui(logger *slog.Logger) *Tui {
 		tableContainerLog:         tableContainerLog,
 		logFilterInput:            logFilterInput,
 		logLayout:                 logLayout,
-		logShowTimestamp:          false,
 		containerDisappearedModal: containerDisappearedModal,
 		helpModal:                 helpModal,
 		helpTextView:              helpTextView,
 		headerView:                headerView,
 		requestData:               make(chan dto.RequestData),
-		currentView:               viewProjectList,
-		projectSortColumn:         projectSortCPU,
-		projectSortAsc:            false,
-		containerSortColumn:       containerSortCPU,
-		containerSortAsc:          false,
-		currentProjectName:        "",
-		currentTableWidth:         atomic.Int32{},
+		currentView:        viewProjectList,
+		projectSortColumn:  projectSortCPU,
+		containerSortColumn: containerSortCPU,
 	}
 
 	// Add pages
