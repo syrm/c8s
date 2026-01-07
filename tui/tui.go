@@ -456,18 +456,6 @@ func (t *Tui) drawContainerLog() {
 	filter := t.getLogFilter()
 	showTimestamp := t.getLogShowTimestamp()
 
-	statusIndicators := ""
-	if paused {
-		statusIndicators += " [yellow](PAUSED)[-]"
-	}
-	if filter != "" {
-		statusIndicators += fmt.Sprintf(" [green](filter: %s)[-]", filter)
-	}
-	if showTimestamp {
-		statusIndicators += " [gray](time)[-]"
-	}
-	t.tableContainerLog.SetTitle(fmt.Sprintf(" [::b]logs%s ", statusIndicators))
-
 	// Apply filter and colorize
 	var logs []string
 	for _, line := range t.tableContainerLogData {

@@ -58,6 +58,11 @@ func NewContainer(
 	if status == "" {
 		status = statusFromAction(action)
 	}
+	// Default to "created" if status is still unknown
+	// (container must exist to receive events)
+	if status == "" {
+		status = "created"
+	}
 
 	c := &Container{
 		ID:      ContainerID(dockerContainer.ID),
@@ -117,15 +122,22 @@ func (c *Container) Delete() {
 }
 
 func (c *Container) SetStatusFromAction(action events.Action) {
-	c.Status = statusFromAction(action)
-	// Clear pending action when status actually changes
-	c.PendingAction = ""
+	newStatus := statusFromAction(action)
+	// Only update status if the action represents a known state change
+	if newStatus != "" {
+		c.Status = newStatus
+		// Clear pending action when status actually changes
+		c.PendingAction = ""
+	}
 }
 
 func (c *Container) SetPendingAction(action string) {
 	c.PendingAction = action
 }
 
+// statusFromAction returns the container status based on a Docker event action.
+// Returns empty string for actions that don't represent a state change
+// (e.g., exec_create, exec_start, health_status, top, rename, etc.)
 func statusFromAction(action events.Action) string {
 	switch action {
 	case events.ActionStart, events.ActionUnPause, events.ActionReload:
@@ -141,7 +153,9 @@ func statusFromAction(action events.Action) string {
 	case events.ActionRemove, events.ActionDelete, events.ActionDestroy:
 		return "removing"
 	default:
-		return "unknown"
+		// Unknown actions (exec_*, health_status, top, rename, etc.)
+		// should not change the container status
+		return ""
 	}
 }
 
