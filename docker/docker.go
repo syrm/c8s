@@ -115,13 +115,13 @@ func (d *Docker) handleRequests(ctx context.Context) {
 				d.handleRequestContainerLog(ctx, r)
 
 			case *dto.RequestProject:
-				d.handleRequestContainerProject(r)
+				d.handleRequestContainerProject(ctx, r)
 
 			case *dto.RequestSetPendingAction:
-				d.handleRequestSetPendingAction(r)
+				d.handleRequestSetPendingAction(ctx, r)
 
 			case *dto.RequestProjectList:
-				d.handleRequestProjectList(r)
+				d.handleRequestProjectList(ctx, r)
 			}
 		}
 	}
@@ -221,7 +221,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	}
 }
 
-func (d *Docker) handleRequestContainerProject(r *dto.RequestProject) {
+func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.RequestProject) {
 	var containers []dto.Container
 
 	select {
@@ -252,10 +252,12 @@ func (d *Docker) handleRequestContainerProject(r *dto.RequestProject) {
 	case <-time.After(channelTimeout):
 		d.logger.Warn("timeout sending to containersCommand in handleRequestContainerProject")
 		r.Response <- containers
+	case <-ctx.Done():
+		r.Response <- containers
 	}
 }
 
-func (d *Docker) handleRequestSetPendingAction(r *dto.RequestSetPendingAction) {
+func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.RequestSetPendingAction) {
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
@@ -281,10 +283,12 @@ func (d *Docker) handleRequestSetPendingAction(r *dto.RequestSetPendingAction) {
 	case <-time.After(channelTimeout):
 		d.logger.Warn("timeout sending to containersCommand in handleRequestSetPendingAction")
 		r.Response <- false
+	case <-ctx.Done():
+		r.Response <- false
 	}
 }
 
-func (d *Docker) handleRequestProjectList(r *dto.RequestProjectList) {
+func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestProjectList) {
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
@@ -347,6 +351,8 @@ func (d *Docker) handleRequestProjectList(r *dto.RequestProjectList) {
 	}:
 	case <-time.After(channelTimeout):
 		d.logger.Warn("timeout sending to containersCommand in handleRequestProjectList")
+		r.Response <- nil
+	case <-ctx.Done():
 		r.Response <- nil
 	}
 }
@@ -582,7 +588,7 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 				break
 			}
 
-			d.logger.InfoContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
+			d.logger.DebugContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
 			break
 		}
 

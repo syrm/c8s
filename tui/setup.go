@@ -3,7 +3,6 @@ package tui
 import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"github.com/syrm/c8s/dto"
 )
 
 // setupStyles configures tview global styles (k9s-like appearance).
@@ -381,25 +380,6 @@ func (t *Tui) setupModalCallbacks() {
 		}
 		return event
 	})
-}
-
-// findContainerByService finds a container in the current view by service name.
-func (t *Tui) findContainerByService(rowIndex int) *dto.Container {
-	t.tableContainerDataLock.RLock()
-	defer t.tableContainerDataLock.RUnlock()
-
-	cell := t.tableContainer.GetCell(rowIndex, 0)
-	if cell == nil {
-		return nil
-	}
-	cellText := cell.Text
-	for _, container := range t.tableContainerData {
-		if fuzzyMatch(cellText, container.Service) {
-			c := container
-			return &c
-		}
-	}
-	return nil
 }
 
 // Thread-safe helper methods for state management

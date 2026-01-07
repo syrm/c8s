@@ -52,21 +52,6 @@ func filterProjects(projects []dto.Project, query string) []dto.Project {
 	return filtered
 }
 
-// filterContainers returns containers matching the search query.
-func filterContainers(containers []dto.Container, query string) []dto.Container {
-	if query == "" {
-		return containers
-	}
-
-	filtered := make([]dto.Container, 0, len(containers))
-	for _, container := range containers {
-		if fuzzyMatch(container.Service, query) {
-			filtered = append(filtered, container)
-		}
-	}
-	return filtered
-}
-
 // compareProjects returns comparison result for sorting projects.
 func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending bool) int {
 	var cmp int

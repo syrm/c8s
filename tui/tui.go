@@ -731,7 +731,7 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 
 	if c.ID == "" {
 		// Container disappeared again!
-		t.logger.InfoContext(ctx, "container disappeared again")
+		t.logger.DebugContext(ctx, "container disappeared again")
 		if ctxCancel != nil {
 			ctxCancel()
 		}
@@ -740,12 +740,12 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 
 	// Wait until we have actual logs before hiding the modal
 	if len(c.Logs) == 0 {
-		t.logger.InfoContext(ctx, "still waiting for logs...")
+		t.logger.DebugContext(ctx, "still waiting for logs...")
 		return ctxCancel
 	}
 
 	// We have logs! Update them and close the modal
-	t.logger.InfoContext(ctx, "got logs, closing modal", slog.Int("log_count", len(c.Logs)))
+	t.logger.DebugContext(ctx, "got logs, closing modal", slog.Int("log_count", len(c.Logs)))
 	t.setContainerDisappeared(false)
 	t.setTableContainerLogData(c.Logs)
 
@@ -761,7 +761,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 	currentContainerService := t.getCurrentContainerService()
 	currentProjectID := t.getCurrentProjectID()
 
-	t.logger.InfoContext(ctx, "checking for container reappearance",
+	t.logger.DebugContext(ctx, "checking for container reappearance",
 		slog.String("service", currentContainerService),
 		slog.String("project", currentProjectID))
 
@@ -783,7 +783,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 
 	var foundContainer *dto.Container
 	for _, container := range containers {
-		t.logger.InfoContext(ctx, "checking container",
+		t.logger.DebugContext(ctx, "checking container",
 			slog.String("container_service", container.Service),
 			slog.String("looking_for", currentContainerService))
 		if container.Service == currentContainerService && string(container.Project.ID) == currentProjectID {
@@ -822,11 +822,11 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 	}
 
 	if c.ID == "" {
-		t.logger.InfoContext(ctx, "container reappeared but logs not ready yet")
+		t.logger.DebugContext(ctx, "container reappeared but logs not ready yet")
 		return nil
 	}
 
-	t.logger.InfoContext(ctx, "log collection started, waiting for logs...")
+	t.logger.DebugContext(ctx, "log collection started, waiting for logs...")
 	return c.LogCancel
 }
 
