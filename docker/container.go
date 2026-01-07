@@ -64,10 +64,16 @@ func NewContainer(
 		status = "created"
 	}
 
+	// Safely get container name
+	containerName := ""
+	if len(dockerContainer.Names) > 0 {
+		containerName = dockerContainer.Names[0]
+	}
+
 	c := &Container{
 		ID:      ContainerID(dockerContainer.ID),
 		Service: dockerContainer.Labels["com.docker.compose.service"],
-		Name:    dockerContainer.Names[0],
+		Name:    containerName,
 		Command: make(chan ContainerCommand),
 		Project: project,
 		cancel:  cancel,

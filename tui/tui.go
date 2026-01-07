@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -38,6 +37,7 @@ type Tui struct {
 	statusBar                  *tview.TextView
 	tableContainerLog          *tview.TextView
 	tableContainerLogData      []string
+	tableContainerLogDataLock  sync.RWMutex
 	logPaused                  bool
 	logPausedLock              sync.RWMutex
 	logShowTimestamp           bool
@@ -53,6 +53,7 @@ type Tui struct {
 	currentContainerID         string
 	currentContainerName       string
 	currentContainerService    string
+	currentContainerLock       sync.RWMutex // Protects currentProjectID, currentContainerID, currentContainerName, currentContainerService
 	containerRefreshPaused     bool
 	containerRefreshPausedLock sync.RWMutex
 	containerRefreshTimer      *time.Timer
@@ -282,7 +283,14 @@ func (t *Tui) calculateStatusWidth(tableWidth int) int {
 }
 
 func (t *Tui) drawProjects() {
-	projects := slices.Collect(maps.Values(t.tableProjectData))
+	// Copy data under lock to avoid race conditions
+	t.tableProjectDataLock.RLock()
+	projects := make([]dto.Project, 0, len(t.tableProjectData))
+	for _, p := range t.tableProjectData {
+		projects = append(projects, p)
+	}
+	t.tableProjectDataLock.RUnlock()
+
 	projects = filterProjects(projects, t.projectSearchQuery)
 	slices.SortStableFunc(projects, func(a, b dto.Project) int {
 		return compareProjects(a, b, t.projectSortColumn, t.projectSortAsc)
@@ -345,6 +353,8 @@ func (t *Tui) drawContainers() {
 	}
 	t.tableContainerDataLock.RUnlock()
 
+	currentProjectID := t.getCurrentProjectID()
+
 	// Sort the copied data (no lock needed)
 	slices.SortStableFunc(containers, func(a, b dto.Container) int {
 		return compareContainers(a, b, t.containerSortColumn, t.containerSortAsc)
@@ -352,13 +362,13 @@ func (t *Tui) drawContainers() {
 
 	t.tableContainer.Clear()
 	t.tableProjectDataLock.RLock()
-	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(t.currentProjectID)].Name)
+	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(currentProjectID)].Name)
 	t.tableProjectDataLock.RUnlock()
 
 	index := 0
 	for _, container := range containers {
 		// Filter by project
-		if string(container.Project.ID) != t.currentProjectID {
+		if string(container.Project.ID) != currentProjectID {
 			continue
 		}
 
@@ -455,10 +465,11 @@ func (t *Tui) drawContainerLog() {
 	paused := t.getLogPaused()
 	filter := t.getLogFilter()
 	showTimestamp := t.getLogShowTimestamp()
+	logData := t.getTableContainerLogData()
 
 	// Apply filter and colorize
 	var logs []string
-	for _, line := range t.tableContainerLogData {
+	for _, line := range logData {
 		if filter != "" && !strings.Contains(strings.ToLower(line), strings.ToLower(filter)) {
 			continue
 		}
@@ -602,22 +613,29 @@ func (t *Tui) refreshProjectList() {
 		return
 	}
 
-	response := make(chan []dto.Project)
-	t.requestData <- &dto.RequestProjectList{
-		Response: response,
+	response := make(chan []dto.Project, 1)
+	select {
+	case t.requestData <- &dto.RequestProjectList{Response: response}:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout sending project list request")
+		return
 	}
 
-	projects := <-response
-	t.tableProjectDataLock.Lock()
-	t.tableProjectData = make(map[dto.ProjectID]dto.Project)
-	for _, p := range projects {
-		t.tableProjectData[p.ID] = p
-	}
-	t.tableProjectDataLock.Unlock()
+	select {
+	case projects := <-response:
+		t.tableProjectDataLock.Lock()
+		t.tableProjectData = make(map[dto.ProjectID]dto.Project)
+		for _, p := range projects {
+			t.tableProjectData[p.ID] = p
+		}
+		t.tableProjectDataLock.Unlock()
 
-	t.app.QueueUpdateDraw(func() {
-		t.drawProjects()
-	})
+		t.app.QueueUpdateDraw(func() {
+			t.drawProjects()
+		})
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout waiting for project list response")
+	}
 }
 
 func (t *Tui) refreshContainerList() {
@@ -625,23 +643,30 @@ func (t *Tui) refreshContainerList() {
 		return
 	}
 
-	response := make(chan []dto.Container)
-	t.requestData <- &dto.RequestProject{
-		ProjectID: dto.ProjectID(t.currentProjectID),
-		Response:  response,
+	currentProjectID := t.getCurrentProjectID()
+	response := make(chan []dto.Container, 1)
+	select {
+	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: response}:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout sending container list request")
+		return
 	}
 
-	containers := <-response
-	t.tableContainerDataLock.Lock()
-	t.tableContainerData = make(map[dto.ContainerID]dto.Container)
-	for _, c := range containers {
-		t.tableContainerData[c.ID] = c
-	}
-	t.tableContainerDataLock.Unlock()
+	select {
+	case containers := <-response:
+		t.tableContainerDataLock.Lock()
+		t.tableContainerData = make(map[dto.ContainerID]dto.Container)
+		for _, c := range containers {
+			t.tableContainerData[c.ID] = c
+		}
+		t.tableContainerDataLock.Unlock()
 
-	t.app.QueueUpdateDraw(func() {
-		t.drawContainers()
-	})
+		t.app.QueueUpdateDraw(func() {
+			t.drawContainers()
+		})
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout waiting for container list response")
+	}
 }
 
 func (t *Tui) refreshContainerLog(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
@@ -653,7 +678,8 @@ func (t *Tui) refreshContainerLog(ctx context.Context, ctxCancel context.CancelF
 		return t.handleDisappearedContainer(ctx, ctxCancel)
 	}
 
-	t.logger.InfoContext(ctx, "fetching logs for container", slog.String("container_id", t.currentContainerID))
+	currentContainerID := t.getCurrentContainerID()
+	t.logger.InfoContext(ctx, "fetching logs for container", slog.String("container_id", currentContainerID))
 
 	// First time we enter this view, start the log collection
 	if ctxCancel == nil {
@@ -670,13 +696,24 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 		return t.tryReconnectContainer(ctx)
 	}
 
+	currentContainerID := t.getCurrentContainerID()
+
 	// Log collection is running, check if we have logs now
-	response := make(chan dto.Container)
-	t.requestData <- &dto.RequestContainerLog{
-		ContainerID: dto.ContainerID(t.currentContainerID),
-		Response:    response,
+	response := make(chan dto.Container, 1)
+	select {
+	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout sending container log request in handleDisappearedContainer")
+		return ctxCancel
 	}
-	c := <-response
+
+	var c dto.Container
+	select {
+	case c = <-response:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout waiting for container log response in handleDisappearedContainer")
+		return ctxCancel
+	}
 
 	if c.ID == "" {
 		// Container disappeared again!
@@ -696,7 +733,7 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 	// We have logs! Update them and close the modal
 	t.logger.InfoContext(ctx, "got logs, closing modal", slog.Int("log_count", len(c.Logs)))
 	t.setContainerDisappeared(false)
-	t.tableContainerLogData = c.Logs
+	t.setTableContainerLogData(c.Logs)
 
 	t.app.QueueUpdateDraw(func() {
 		t.drawContainerLog()
@@ -707,23 +744,35 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 }
 
 func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
-	t.logger.InfoContext(ctx, "checking for container reappearance",
-		slog.String("service", t.currentContainerService),
-		slog.String("project", t.currentProjectID))
+	currentContainerService := t.getCurrentContainerService()
+	currentProjectID := t.getCurrentProjectID()
 
-	responseProject := make(chan []dto.Container)
-	t.requestData <- &dto.RequestProject{
-		ProjectID: dto.ProjectID(t.currentProjectID),
-		Response:  responseProject,
+	t.logger.InfoContext(ctx, "checking for container reappearance",
+		slog.String("service", currentContainerService),
+		slog.String("project", currentProjectID))
+
+	responseProject := make(chan []dto.Container, 1)
+	select {
+	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: responseProject}:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout sending project request in tryReconnectContainer")
+		return nil
 	}
-	containers := <-responseProject
+
+	var containers []dto.Container
+	select {
+	case containers = <-responseProject:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout waiting for project response in tryReconnectContainer")
+		return nil
+	}
 
 	var foundContainer *dto.Container
 	for _, container := range containers {
 		t.logger.InfoContext(ctx, "checking container",
 			slog.String("container_service", container.Service),
-			slog.String("looking_for", t.currentContainerService))
-		if container.Service == t.currentContainerService && string(container.Project.ID) == t.currentProjectID {
+			slog.String("looking_for", currentContainerService))
+		if container.Service == currentContainerService && string(container.Project.ID) == currentProjectID {
 			foundContainer = &container
 			break
 		}
@@ -738,16 +787,25 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 		slog.String("service", foundContainer.Service),
 		slog.String("new_id", string(foundContainer.ID)))
 
-	t.currentContainerID = string(foundContainer.ID)
-	t.currentContainerName = foundContainer.Name
+	t.setCurrentContainerInfo(string(foundContainer.ID), foundContainer.Name, foundContainer.Service)
 
 	// Start log collection for the new container
-	response := make(chan dto.Container)
-	t.requestData <- &dto.RequestContainerLog{
-		ContainerID: dto.ContainerID(t.currentContainerID),
-		Response:    response,
+	response := make(chan dto.Container, 1)
+	newContainerID := t.getCurrentContainerID()
+	select {
+	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(newContainerID), Response: response}:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout sending container log request in tryReconnectContainer")
+		return nil
 	}
-	c := <-response
+
+	var c dto.Container
+	select {
+	case c = <-response:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout waiting for container log response in tryReconnectContainer")
+		return nil
+	}
 
 	if c.ID == "" {
 		t.logger.InfoContext(ctx, "container reappeared but logs not ready yet")
@@ -759,22 +817,37 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 }
 
 func (t *Tui) startLogCollection(ctx context.Context) context.CancelFunc {
-	response := make(chan dto.Container)
-	t.requestData <- &dto.RequestContainerLog{
-		ContainerID: dto.ContainerID(t.currentContainerID),
-		Response:    response,
+	currentContainerID := t.getCurrentContainerID()
+	currentContainerName := t.getCurrentContainerName()
+
+	response := make(chan dto.Container, 1)
+	select {
+	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout sending container log request in startLogCollection")
+		return nil
 	}
-	c := <-response
+
+	var c dto.Container
+	select {
+	case c = <-response:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout waiting for container log response in startLogCollection")
+		return nil
+	}
 
 	if c.ID == "" {
 		// Container no longer exists, show modal
-		containerName := t.currentContainerName
-		containerID := t.currentContainerID
-
 		t.setContainerDisappeared(true)
 
+		// Safe substring for container ID display
+		displayID := currentContainerID
+		if len(displayID) > 12 {
+			displayID = displayID[:12]
+		}
+
 		t.app.QueueUpdateDraw(func() {
-			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
+			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", currentContainerName, displayID))
 			t.pages.ShowPage("modal")
 		})
 		return nil
@@ -783,13 +856,24 @@ func (t *Tui) startLogCollection(ctx context.Context) context.CancelFunc {
 }
 
 func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
-	response := make(chan dto.Container)
-	t.requestData <- &dto.RequestContainerLog{
-		ContainerID: dto.ContainerID(t.currentContainerID),
-		Response:    response,
+	currentContainerID := t.getCurrentContainerID()
+	currentContainerName := t.getCurrentContainerName()
+
+	response := make(chan dto.Container, 1)
+	select {
+	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout sending container log request in updateLogs")
+		return ctxCancel
 	}
 
-	c := <-response
+	var c dto.Container
+	select {
+	case c = <-response:
+	case <-time.After(channelTimeout):
+		t.logger.Warn("timeout waiting for container log response in updateLogs")
+		return ctxCancel
+	}
 
 	if c.ID == "" {
 		// Container no longer exists, show modal
@@ -797,13 +881,16 @@ func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) cont
 			ctxCancel()
 		}
 
-		containerName := t.currentContainerName
-		containerID := t.currentContainerID
-
 		t.setContainerDisappeared(true)
 
+		// Safe substring for container ID display
+		displayID := currentContainerID
+		if len(displayID) > 12 {
+			displayID = displayID[:12]
+		}
+
 		t.app.QueueUpdateDraw(func() {
-			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
+			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", currentContainerName, displayID))
 			t.pages.ShowPage("modal")
 		})
 		return nil
@@ -811,7 +898,7 @@ func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) cont
 
 	// Only update logs if we have some (don't erase existing logs with empty array)
 	if len(c.Logs) > 0 {
-		t.tableContainerLogData = c.Logs
+		t.setTableContainerLogData(c.Logs)
 	}
 
 	t.app.QueueUpdateDraw(func() {
@@ -828,5 +915,21 @@ func (t *Tui) Render(ctx context.Context) error {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
 		return err
 	}
+
+	// Cleanup on exit
+	t.cleanup()
 	return nil
+}
+
+// cleanup releases resources when the TUI exits
+func (t *Tui) cleanup() {
+	// Stop all timers
+	if t.statusTimer != nil {
+		t.statusTimer.Stop()
+	}
+	t.stopContainerRefreshTimer()
+	t.stopProjectRefreshTimer()
+
+	// Close request channel to signal docker layer
+	close(t.requestData)
 }

@@ -110,9 +110,13 @@ func (t *Tui) enterContainerView() {
 	rowIndex, _ := t.tableProject.GetSelection()
 	t.tableProjectDataLock.RLock()
 	for _, project := range t.tableProjectData {
-		cellText := t.tableProject.GetCell(rowIndex, 0).Text
+		cell := t.tableProject.GetCell(rowIndex, 0)
+		if cell == nil {
+			continue
+		}
+		cellText := cell.Text
 		if fuzzyMatch(cellText, project.Name) {
-			t.currentProjectID = string(project.ID)
+			t.setCurrentProjectID(string(project.ID))
 			t.currentProjectName = project.Name
 			t.setCurrentView(viewProject)
 			break
@@ -213,7 +217,7 @@ func (t *Tui) setupContainerTableHandler() {
 func (t *Tui) exitContainerView() {
 	t.pages.SwitchToPage("projectList")
 	t.setCurrentView(viewProjectList)
-	t.currentContainerID = ""
+	t.setCurrentContainerID("")
 	t.containerSearchQuery = ""
 	t.containerSearchInput.SetText("")
 	t.setContainerRefreshPaused(false)
@@ -226,11 +230,13 @@ func (t *Tui) enterLogView() {
 	rowIndex, _ := t.tableContainer.GetSelection()
 	t.tableContainerDataLock.RLock()
 	for _, container := range t.tableContainerData {
-		cellText := t.tableContainer.GetCell(rowIndex, 0).Text
+		cell := t.tableContainer.GetCell(rowIndex, 0)
+		if cell == nil {
+			continue
+		}
+		cellText := cell.Text
 		if fuzzyMatch(cellText, container.Service) {
-			t.currentContainerID = string(container.ID)
-			t.currentContainerName = container.Name
-			t.currentContainerService = container.Service
+			t.setCurrentContainerInfo(string(container.ID), container.Name, container.Service)
 			break
 		}
 	}
@@ -291,12 +297,12 @@ func (t *Tui) exitLogView() {
 	t.drawContainers()
 	t.pages.SwitchToPage("containerList")
 	t.setCurrentView(viewProject)
-	t.currentContainerID = ""
+	t.setCurrentContainerID("")
 	t.setLogPaused(false)
 	t.setLogFilter("")
 	t.logFilterInput.SetText("")
 	t.logLayout.RemoveItem(t.logFilterInput)
-	t.tableContainerLogData = nil
+	t.clearTableContainerLogData()
 	t.setContainerDisappeared(false)
 	t.updateHeader()
 }
@@ -359,14 +365,12 @@ func (t *Tui) setupModalCallbacks() {
 		t.drawContainers()
 		t.pages.SwitchToPage("containerList")
 		t.setCurrentView(viewProject)
-		t.currentContainerID = ""
-		t.currentContainerName = ""
-		t.currentContainerService = ""
+		t.clearCurrentContainerInfo()
 		t.setLogPaused(false)
 		t.setLogFilter("")
 		t.logFilterInput.SetText("")
 		t.logLayout.RemoveItem(t.logFilterInput)
-		t.tableContainerLogData = nil
+		t.clearTableContainerLogData()
 		t.updateHeader()
 	})
 
@@ -502,4 +506,93 @@ func (t *Tui) stopProjectRefreshTimer() {
 		t.projectRefreshTimer.Stop()
 		t.projectRefreshTimer = nil
 	}
+}
+
+// Thread-safe helpers for current container/project state
+
+func (t *Tui) getCurrentProjectID() string {
+	t.currentContainerLock.RLock()
+	defer t.currentContainerLock.RUnlock()
+	return t.currentProjectID
+}
+
+func (t *Tui) setCurrentProjectID(id string) {
+	t.currentContainerLock.Lock()
+	defer t.currentContainerLock.Unlock()
+	t.currentProjectID = id
+}
+
+func (t *Tui) getCurrentContainerID() string {
+	t.currentContainerLock.RLock()
+	defer t.currentContainerLock.RUnlock()
+	return t.currentContainerID
+}
+
+func (t *Tui) setCurrentContainerID(id string) {
+	t.currentContainerLock.Lock()
+	defer t.currentContainerLock.Unlock()
+	t.currentContainerID = id
+}
+
+func (t *Tui) getCurrentContainerName() string {
+	t.currentContainerLock.RLock()
+	defer t.currentContainerLock.RUnlock()
+	return t.currentContainerName
+}
+
+func (t *Tui) setCurrentContainerName(name string) {
+	t.currentContainerLock.Lock()
+	defer t.currentContainerLock.Unlock()
+	t.currentContainerName = name
+}
+
+func (t *Tui) getCurrentContainerService() string {
+	t.currentContainerLock.RLock()
+	defer t.currentContainerLock.RUnlock()
+	return t.currentContainerService
+}
+
+func (t *Tui) setCurrentContainerService(service string) {
+	t.currentContainerLock.Lock()
+	defer t.currentContainerLock.Unlock()
+	t.currentContainerService = service
+}
+
+func (t *Tui) setCurrentContainerInfo(id, name, service string) {
+	t.currentContainerLock.Lock()
+	defer t.currentContainerLock.Unlock()
+	t.currentContainerID = id
+	t.currentContainerName = name
+	t.currentContainerService = service
+}
+
+func (t *Tui) clearCurrentContainerInfo() {
+	t.currentContainerLock.Lock()
+	defer t.currentContainerLock.Unlock()
+	t.currentContainerID = ""
+	t.currentContainerName = ""
+	t.currentContainerService = ""
+}
+
+// Thread-safe helpers for tableContainerLogData
+
+func (t *Tui) getTableContainerLogData() []string {
+	t.tableContainerLogDataLock.RLock()
+	defer t.tableContainerLogDataLock.RUnlock()
+	// Return a copy to avoid race conditions
+	result := make([]string, len(t.tableContainerLogData))
+	copy(result, t.tableContainerLogData)
+	return result
+}
+
+func (t *Tui) setTableContainerLogData(data []string) {
+	t.tableContainerLogDataLock.Lock()
+	defer t.tableContainerLogDataLock.Unlock()
+	t.tableContainerLogData = data
+}
+
+func (t *Tui) clearTableContainerLogData() {
+	t.tableContainerLogDataLock.Lock()
+	defer t.tableContainerLogDataLock.Unlock()
+	t.tableContainerLogData = nil
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/syrm/c8s/dto"
 )
@@ -27,7 +28,11 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 	t.tableContainerDataLock.RLock()
 	defer t.tableContainerDataLock.RUnlock()
 
-	cellText := t.tableContainer.GetCell(rowIndex, 0).Text
+	cell := t.tableContainer.GetCell(rowIndex, 0)
+	if cell == nil {
+		return nil
+	}
+	cellText := cell.Text
 	for _, container := range t.tableContainerData {
 		if !strings.Contains(cellText, container.Service) {
 			continue
@@ -53,13 +58,21 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 
 // setPendingAction sends a request to set a pending action on a container.
 func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
-	response := make(chan bool)
-	t.requestData <- &dto.RequestSetPendingAction{
+	response := make(chan bool, 1)
+	select {
+	case t.requestData <- &dto.RequestSetPendingAction{
 		ContainerID:   containerID,
 		PendingAction: action,
 		Response:      response,
+	}:
+	case <-time.After(channelTimeout):
+		return
 	}
-	<-response
+
+	select {
+	case <-response:
+	case <-time.After(channelTimeout):
+	}
 }
 
 // updateLocalCache updates the local container cache with a pending action.

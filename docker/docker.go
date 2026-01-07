@@ -88,7 +88,12 @@ func (d *Docker) handleRequests(ctx context.Context) {
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "handleRequests context is done")
 			return
-		case req := <-d.requestData:
+		case req, ok := <-d.requestData:
+			if !ok {
+				// Channel closed, exit gracefully
+				d.logger.DebugContext(ctx, "handleRequests channel closed")
+				return
+			}
 			switch r := req.(type) {
 
 			case *dto.RequestContainerLog:
@@ -184,7 +189,7 @@ func (d *Docker) handleRequestProjectList(r *dto.RequestProjectList) {
 		functor: func(docker *Docker) *Container {
 			projects := make(map[dto.ProjectID]dto.Project)
 
-			for _, c := range d.containers {
+			for _, c := range docker.containers {
 				response := make(chan ContainerResponse)
 				c.Command <- ContainerCommand{
 					response: response,
@@ -242,8 +247,8 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 				container.LogCollectionActive = false
 			},
 		}:
-		default:
-			// Channel closed or full, container might be deleted
+		case <-time.After(time.Second):
+			// Timeout waiting to reset flag, container might be deleted
 		}
 	}()
 
@@ -257,7 +262,6 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	})
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container logs failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
-
 		return
 	}
 
@@ -265,8 +269,11 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 
 	// Use a pipe to demultiplex the Docker log stream
 	pr, pw := io.Pipe()
-	defer pr.Close()
 
+	// Channel to receive lines from the reader goroutine
+	lines := make(chan string, 100)
+
+	// Goroutine to handle stdcopy
 	go func() {
 		defer pw.Close()
 		_, err := stdcopy.StdCopy(pw, pw, out)
@@ -275,35 +282,63 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		}
 	}()
 
-	reader := bufio.NewReader(pr)
+	// Goroutine to read lines (this is the blocking I/O)
+	go func() {
+		defer close(lines)
+		reader := bufio.NewReader(pr)
+		for {
+			line, errReader := reader.ReadString('\n')
+			if errReader != nil {
+				if errReader != io.EOF {
+					d.logger.DebugContext(ctx, "end of container logs", slog.String("container_id", string(c.ID)), slog.Any("error", errReader))
+				}
+				return
+			}
+			select {
+			case lines <- line:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Main loop: receive lines or handle context cancellation
 	for {
 		select {
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "collectContainerLogs context is done", slog.String("container_id", string(c.ID)))
-			pr.Close() // Unblock stdcopy goroutine
+			pr.Close() // Unblock reader goroutine
 			return
-		default:
-			line, errReader := reader.ReadString('\n')
-			if errReader != nil {
-				if errReader == io.EOF {
-					return
-				}
-
-				d.logger.ErrorContext(ctx, "end of container logs", slog.String("container_id", string(c.ID)), slog.Any("error", errReader))
+		case line, ok := <-lines:
+			if !ok {
+				// Channel closed, reader finished
 				return
 			}
-
-			c.Command <- ContainerCommand{
+			// Use select with timeout to avoid blocking forever on container command
+			select {
+			case c.Command <- ContainerCommand{
 				functor: func(container *Container) {
 					container.AppendLog(line)
 				},
+			}:
+			case <-time.After(time.Second):
+				// Timeout sending log, container might be busy or deleted
+			case <-ctx.Done():
+				pr.Close()
+				return
 			}
 		}
 	}
 }
 
+// dockerAPITimeout is the timeout for one-shot Docker API calls
+const dockerAPITimeout = 30 * time.Second
+
 func (d *Docker) collectContainers(ctx context.Context) error {
-	dockerContainers, err := d.client.ContainerList(ctx, apiContainer.ListOptions{All: true})
+	listCtx, cancel := context.WithTimeout(ctx, dockerAPITimeout)
+	defer cancel()
+
+	dockerContainers, err := d.client.ContainerList(listCtx, apiContainer.ListOptions{All: true})
 	if err != nil {
 		return err
 	}
