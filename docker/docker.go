@@ -112,14 +112,7 @@ func (d *Docker) handleRequests(ctx context.Context) {
 			switch r := req.(type) {
 
 			case *dto.RequestContainerLog:
-				ctxLog, cancel := context.WithCancel(ctx)
-				c := d.handleRequestContainerLog(ctxLog, r)
-				if c == nil {
-					cancel()
-					r.Response <- dto.Container{}
-					continue
-				}
-				r.Response <- containerToDTO(c, true, cancel)
+				d.handleRequestContainerLog(ctx, r)
 
 			case *dto.RequestProject:
 				d.handleRequestContainerProject(r)
@@ -134,7 +127,8 @@ func (d *Docker) handleRequests(ctx context.Context) {
 	}
 }
 
-func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) *Container {
+func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) {
+	// Get container via containersCommand
 	response := make(chan *Container)
 
 	select {
@@ -146,9 +140,11 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	}:
 	case <-time.After(channelTimeout):
 		d.logger.Warn("timeout sending to containersCommand in handleRequestContainerLog")
-		return nil
+		r.Response <- dto.Container{}
+		return
 	case <-ctx.Done():
-		return nil
+		r.Response <- dto.Container{}
+		return
 	}
 
 	var c *Container
@@ -156,28 +152,73 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	case c = <-response:
 	case <-time.After(channelTimeout):
 		d.logger.Warn("timeout waiting for response in handleRequestContainerLog")
-		return nil
+		r.Response <- dto.Container{}
+		return
 	case <-ctx.Done():
-		return nil
+		r.Response <- dto.Container{}
+		return
 	}
 
-	if c != nil && !c.LogCollectionActive {
-		select {
-		case c.Command <- ContainerCommand{
-			functor: func(container *Container) {
+	if c == nil {
+		r.Response <- dto.Container{}
+		return
+	}
+
+	// Container exists - create cancel context for logs
+	ctxLog, cancel := context.WithCancel(ctx)
+
+	// Atomically: check LogCollectionActive, start collection if needed, build DTO with logs
+	// All done inside the functor to avoid data races
+	dtoResponse := make(chan dto.Container, 1)
+	select {
+	case c.Command <- ContainerCommand{
+		functor: func(container *Container) {
+			// Start log collection if not active (synchronized access)
+			if !container.LogCollectionActive {
 				container.LogCollectionActive = true
-			},
-		}:
-		case <-time.After(channelTimeout):
-			d.logger.Warn("timeout sending to container command in handleRequestContainerLog")
-			return c
-		case <-ctx.Done():
-			return c
-		}
-		go d.collectContainerLogs(ctx, c)
+				go d.collectContainerLogs(ctxLog, container)
+			}
+
+			// Build DTO with logs copy (synchronized access to Logs)
+			dtoContainer := dto.Container{
+				ID:               dto.ContainerID(container.ID),
+				Project:          container.Project,
+				Service:          container.Service,
+				Name:             container.Name,
+				CPUPercentage:    container.CPUPercentage,
+				MemoryPercentage: container.MemoryPercentage,
+				Status:           container.Status,
+				PendingAction:    container.PendingAction,
+				Logs:             make([]string, len(container.Logs)),
+				LogCancel:        cancel,
+			}
+			copy(dtoContainer.Logs, container.Logs)
+			dtoResponse <- dtoContainer
+		},
+	}:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout sending to container command in handleRequestContainerLog")
+		cancel()
+		r.Response <- dto.Container{}
+		return
+	case <-ctx.Done():
+		cancel()
+		r.Response <- dto.Container{}
+		return
 	}
 
-	return c
+	// Wait for DTO and send response
+	select {
+	case dtoContainer := <-dtoResponse:
+		r.Response <- dtoContainer
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout waiting for dto in handleRequestContainerLog")
+		cancel()
+		r.Response <- dto.Container{}
+	case <-ctx.Done():
+		cancel()
+		r.Response <- dto.Container{}
+	}
 }
 
 func (d *Docker) handleRequestContainerProject(r *dto.RequestProject) {
