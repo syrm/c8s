@@ -119,8 +119,8 @@ func (t *Tui) handleContainerStop() bool {
 		return false
 	}
 
-	t.setPendingAction(container.ID, "stopping")
-	t.updateLocalCache(container.ID, "stopping")
+	t.setPendingAction(container.ID, actionStopping)
+	t.updateLocalCache(container.ID, actionStopping)
 	t.drawContainers()
 
 	go func() {
@@ -144,9 +144,9 @@ func (t *Tui) handleContainerRestart() bool {
 
 	var action string
 	if container.Status == dto.StatusRunning {
-		action = "restarting"
+		action = actionRestarting
 	} else {
-		action = "starting"
+		action = actionStarting
 	}
 
 	t.setPendingAction(container.ID, action)
@@ -178,8 +178,8 @@ func (t *Tui) handleContainerRemove() bool {
 		return false
 	}
 
-	t.setPendingAction(container.ID, "removing")
-	t.updateLocalCache(container.ID, "removing")
+	t.setPendingAction(container.ID, actionRemoving)
+	t.updateLocalCache(container.ID, actionRemoving)
 	t.drawContainers()
 
 	go func() {

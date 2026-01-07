@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// Common timestamp formats for parsing log timestamps
-var timestampFormats = []string{
+// timestampFormats contains supported formats for parsing log timestamps.
+// Using an array instead of slice to make it clear this is immutable.
+var timestampFormats = [...]string{
 	time.RFC3339Nano,
 	time.RFC3339,
 	"2006-01-02T15:04:05.999999999Z07:00",

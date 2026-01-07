@@ -58,6 +58,6 @@ func run() error {
 	// Wait for Docker goroutines to finish cleanly
 	doc.Wait()
 
-	logger.InfoContext(ctx, "c8s is over")
+	logger.InfoContext(context.Background(), "c8s is over")
 	return nil
 }

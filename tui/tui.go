@@ -78,6 +78,8 @@ type Tui struct {
 	headerView                 *tview.TextView
 	requestData                chan dto.RequestData
 	logger                     *slog.Logger
+	closing                    bool
+	closingLock                sync.RWMutex
 }
 
 func NewTui(logger *slog.Logger) *Tui {
@@ -502,6 +504,14 @@ func (t *Tui) showStatusMessage(message string) {
 
 	// Clear message after duration
 	t.statusTimer = time.AfterFunc(statusMessageDuration, func() {
+		// Check if TUI is closing to avoid race with cleanup
+		t.closingLock.RLock()
+		isClosing := t.closing
+		t.closingLock.RUnlock()
+		if isClosing {
+			return
+		}
+
 		t.app.QueueUpdateDraw(func() {
 			t.containerLayout.RemoveItem(t.statusBar)
 			t.statusBar.SetText("")
@@ -931,6 +941,11 @@ func (t *Tui) Render(ctx context.Context) error {
 
 // cleanup releases resources when the TUI exits
 func (t *Tui) cleanup() {
+	// Set closing flag to prevent timer callbacks from running
+	t.closingLock.Lock()
+	t.closing = true
+	t.closingLock.Unlock()
+
 	// Stop all timers
 	if t.statusTimer != nil {
 		t.statusTimer.Stop()

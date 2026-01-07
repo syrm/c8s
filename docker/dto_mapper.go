@@ -7,7 +7,7 @@ import (
 // containerResponseToDTO converts a ContainerResponse to dto.Container.
 func containerResponseToDTO(c ContainerResponse) dto.Container {
 	return dto.Container{
-		ID:               dto.ContainerID(c.ID),
+		ID:               c.ID,
 		Project:          c.Project,
 		Service:          c.Service,
 		Name:             c.Name,

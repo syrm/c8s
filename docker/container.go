@@ -19,12 +19,9 @@ const (
 	StatusRemoving   = dto.StatusRemoving
 )
 
-// ContainerID is a unique identifier for a Docker container.
-type ContainerID string
-
 // Container represents a Docker container with its state and metrics.
 type Container struct {
-	ID                  ContainerID
+	ID                  dto.ContainerID
 	Service             string
 	Name                string
 	Project             dto.ContainerProject
@@ -40,7 +37,7 @@ type Container struct {
 
 // ContainerResponse is a snapshot of container state sent through response channels.
 type ContainerResponse struct {
-	ID               ContainerID
+	ID               dto.ContainerID
 	Project          dto.ContainerProject
 	Service          string
 	Name             string
@@ -85,7 +82,7 @@ func NewContainer(
 	}
 
 	c := &Container{
-		ID:      ContainerID(dockerContainer.ID),
+		ID:      dto.ContainerID(dockerContainer.ID),
 		Service: dockerContainer.Labels["com.docker.compose.service"],
 		Name:    containerName,
 		Command: make(chan ContainerCommand),

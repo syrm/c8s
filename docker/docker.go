@@ -34,7 +34,7 @@ type ContainersCommand struct {
 // It provides real-time statistics and log streaming for Docker Compose projects.
 type Docker struct {
 	client            *dockerClient.Client
-	containers        map[ContainerID]*Container
+	containers        map[dto.ContainerID]*Container
 	containersCommand chan ContainersCommand
 	requestData       <-chan dto.RequestData
 	logger            *slog.Logger
@@ -56,7 +56,7 @@ func NewDocker(
 	return &Docker{
 		client:            cli,
 		// Pre-allocate map for typical Docker Compose setups
-		containers:        make(map[ContainerID]*Container, initialContainerMapSize),
+		containers:        make(map[dto.ContainerID]*Container, initialContainerMapSize),
 		containersCommand: make(chan ContainersCommand),
 		requestData:       requestData,
 		logger:            logger,
@@ -142,7 +142,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
-			return docker.containers[ContainerID(r.ContainerID)]
+			return docker.containers[r.ContainerID]
 		},
 		response: response,
 	}:
@@ -189,7 +189,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 
 			// Build DTO with logs copy (synchronized access to Logs)
 			dtoContainer := dto.Container{
-				ID:               dto.ContainerID(container.ID),
+				ID:               container.ID,
 				Project:          container.Project,
 				Service:          container.Service,
 				Name:             container.Name,
@@ -269,7 +269,7 @@ func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.Reque
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
-			c, ok := docker.containers[ContainerID(r.ContainerID)]
+			c, ok := docker.containers[r.ContainerID]
 			if !ok {
 				r.Response <- false
 				return nil
@@ -337,9 +337,9 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 				}
 
 				project.CPUPercentage += container.CPUPercentage
-				project.ContainersCPU[dto.ContainerID(container.ID)] = container.CPUPercentage
+				project.ContainersCPU[container.ID] = container.CPUPercentage
 				project.MemoryPercentage += container.MemoryPercentage
-				project.ContainersMemory[dto.ContainerID(container.ID)] = container.MemoryPercentage
+				project.ContainersMemory[container.ID] = container.MemoryPercentage
 
 				isRunning := 0
 				if container.Status == StatusRunning {
@@ -347,7 +347,7 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 				}
 
 				project.ContainersRunning += isRunning
-				project.ContainersState[dto.ContainerID(container.ID)] = container.Status
+				project.ContainersState[container.ID] = container.Status
 
 				projects[projectID] = project
 			}
@@ -510,7 +510,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
-			return docker.containers[ContainerID(dockerContainer.ID)]
+			return docker.containers[dto.ContainerID(dockerContainer.ID)]
 		},
 		response: response,
 	}:
@@ -663,7 +663,7 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			select {
 			case d.containersCommand <- ContainersCommand{
 				functor: func(docker *Docker) *Container {
-					return docker.containers[ContainerID(msg.Actor.ID)]
+					return docker.containers[dto.ContainerID(msg.Actor.ID)]
 				},
 				response: response,
 			}:

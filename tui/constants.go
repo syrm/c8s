@@ -19,6 +19,14 @@ const resourceWarningThreshold = 80.0
 // defaultShell is the default shell to use when opening a container shell.
 const defaultShell = "/bin/sh"
 
+// Pending action constants for container operations.
+const (
+	actionStopping   = "stopping"
+	actionStarting   = "starting"
+	actionRestarting = "restarting"
+	actionRemoving   = "removing"
+)
+
 // channelTimeout is imported from dto for consistent timeout across layers.
 const channelTimeout = dto.ChannelTimeout
 
