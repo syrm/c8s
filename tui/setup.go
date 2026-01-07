@@ -74,14 +74,14 @@ func (t *Tui) setupProjectTableHandler() {
 
 		if r == '/' {
 			t.projectSearchActive = true
-			t.projectSearchInput.SetText(t.projectSearchQuery)
+			t.projectSearchInput.SetText(t.getProjectSearchQuery())
 			t.projectLayout.AddItem(t.projectSearchInput, 1, 0, true)
 			t.app.SetFocus(t.projectSearchInput)
 			return nil
 		}
 
-		if r == 'c' && t.projectSearchQuery != "" {
-			t.projectSearchQuery = ""
+		if r == 'c' && t.getProjectSearchQuery() != "" {
+			t.setProjectSearchQuery("")
 			t.drawProjects()
 			return nil
 		}
@@ -124,7 +124,7 @@ func (t *Tui) enterContainerView() {
 	}
 	t.tableProjectDataLock.RUnlock()
 
-	t.containerSearchQuery = ""
+	t.setContainerSearchQuery("")
 	t.containerSearchInput.SetText("")
 	t.tableContainer.Clear()
 	t.drawContainers()
@@ -158,14 +158,14 @@ func (t *Tui) setupContainerTableHandler() {
 
 		if r == '/' {
 			t.containerSearchActive = true
-			t.containerSearchInput.SetText(t.containerSearchQuery)
+			t.containerSearchInput.SetText(t.getContainerSearchQuery())
 			t.containerLayout.AddItem(t.containerSearchInput, 1, 0, true)
 			t.app.SetFocus(t.containerSearchInput)
 			return nil
 		}
 
-		if r == 'c' && t.containerSearchQuery != "" {
-			t.containerSearchQuery = ""
+		if r == 'c' && t.getContainerSearchQuery() != "" {
+			t.setContainerSearchQuery("")
 			t.drawContainers()
 			return nil
 		}
@@ -218,7 +218,7 @@ func (t *Tui) exitContainerView() {
 	t.pages.SwitchToPage("projectList")
 	t.setCurrentView(viewProjectList)
 	t.setCurrentContainerID("")
-	t.containerSearchQuery = ""
+	t.setContainerSearchQuery("")
 	t.containerSearchInput.SetText("")
 	t.setContainerRefreshPaused(false)
 	t.stopContainerRefreshTimer()
@@ -310,7 +310,7 @@ func (t *Tui) exitLogView() {
 // setupSearchCallbacks sets up callbacks for search inputs.
 func (t *Tui) setupSearchCallbacks() {
 	t.projectSearchInput.SetChangedFunc(func(text string) {
-		t.projectSearchQuery = text
+		t.setProjectSearchQuery(text)
 		t.drawProjects()
 	})
 
@@ -319,14 +319,14 @@ func (t *Tui) setupSearchCallbacks() {
 		t.projectLayout.RemoveItem(t.projectSearchInput)
 		t.app.SetFocus(t.tableProject)
 		if key == tcell.KeyEsc {
-			t.projectSearchQuery = ""
+			t.setProjectSearchQuery("")
 			t.projectSearchInput.SetText("")
 		}
 		t.drawProjects()
 	})
 
 	t.containerSearchInput.SetChangedFunc(func(text string) {
-		t.containerSearchQuery = text
+		t.setContainerSearchQuery(text)
 		t.drawContainers()
 	})
 
@@ -335,7 +335,7 @@ func (t *Tui) setupSearchCallbacks() {
 		t.containerLayout.RemoveItem(t.containerSearchInput)
 		t.app.SetFocus(t.tableContainer)
 		if key == tcell.KeyEsc {
-			t.containerSearchQuery = ""
+			t.setContainerSearchQuery("")
 			t.containerSearchInput.SetText("")
 		}
 		t.drawContainers()
@@ -388,7 +388,11 @@ func (t *Tui) findContainerByService(rowIndex int) *dto.Container {
 	t.tableContainerDataLock.RLock()
 	defer t.tableContainerDataLock.RUnlock()
 
-	cellText := t.tableContainer.GetCell(rowIndex, 0).Text
+	cell := t.tableContainer.GetCell(rowIndex, 0)
+	if cell == nil {
+		return nil
+	}
+	cellText := cell.Text
 	for _, container := range t.tableContainerData {
 		if fuzzyMatch(cellText, container.Service) {
 			c := container
@@ -595,4 +599,30 @@ func (t *Tui) clearTableContainerLogData() {
 	t.tableContainerLogDataLock.Lock()
 	defer t.tableContainerLogDataLock.Unlock()
 	t.tableContainerLogData = nil
+}
+
+// Thread-safe helpers for search queries
+
+func (t *Tui) getProjectSearchQuery() string {
+	t.projectSearchQueryLock.RLock()
+	defer t.projectSearchQueryLock.RUnlock()
+	return t.projectSearchQuery
+}
+
+func (t *Tui) setProjectSearchQuery(query string) {
+	t.projectSearchQueryLock.Lock()
+	defer t.projectSearchQueryLock.Unlock()
+	t.projectSearchQuery = query
+}
+
+func (t *Tui) getContainerSearchQuery() string {
+	t.containerSearchQueryLock.RLock()
+	defer t.containerSearchQueryLock.RUnlock()
+	return t.containerSearchQuery
+}
+
+func (t *Tui) setContainerSearchQuery(query string) {
+	t.containerSearchQueryLock.Lock()
+	defer t.containerSearchQueryLock.Unlock()
+	t.containerSearchQuery = query
 }

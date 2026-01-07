@@ -121,20 +121,43 @@ func (d *Docker) handleRequests(ctx context.Context) {
 
 func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) *Container {
 	response := make(chan *Container)
-	d.containersCommand <- ContainersCommand{
+
+	select {
+	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			return docker.containers[ContainerID(r.ContainerID)]
 		},
 		response: response,
+	}:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout sending to containersCommand in handleRequestContainerLog")
+		return nil
+	case <-ctx.Done():
+		return nil
 	}
 
-	c := <-response
+	var c *Container
+	select {
+	case c = <-response:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout waiting for response in handleRequestContainerLog")
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
 
 	if c != nil && !c.LogCollectionActive {
-		c.Command <- ContainerCommand{
+		select {
+		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
 				container.LogCollectionActive = true
 			},
+		}:
+		case <-time.After(channelTimeout):
+			d.logger.Warn("timeout sending to container command in handleRequestContainerLog")
+			return c
+		case <-ctx.Done():
+			return c
 		}
 		go d.collectContainerLogs(ctx, c)
 	}
@@ -145,26 +168,40 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 func (d *Docker) handleRequestContainerProject(r *dto.RequestProject) {
 	var containers []dto.Container
 
-	d.containersCommand <- ContainersCommand{
+	select {
+	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			for _, c := range docker.containers {
 				if r.ProjectID == c.Project.ID {
 					response := make(chan ContainerResponse)
-					c.Command <- ContainerCommand{
+					select {
+					case c.Command <- ContainerCommand{
 						response: response,
+					}:
+						select {
+						case container := <-response:
+							containers = append(containers, containerResponseToDTO(container))
+						case <-time.After(channelTimeout):
+							// Skip this container if timeout
+						}
+					case <-time.After(channelTimeout):
+						// Skip this container if timeout
 					}
-					container := <-response
-					containers = append(containers, containerResponseToDTO(container))
 				}
 			}
 			r.Response <- containers
 			return nil
 		},
+	}:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout sending to containersCommand in handleRequestContainerProject")
+		r.Response <- containers
 	}
 }
 
 func (d *Docker) handleRequestSetPendingAction(r *dto.RequestSetPendingAction) {
-	d.containersCommand <- ContainersCommand{
+	select {
+	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			c, ok := docker.containers[ContainerID(r.ContainerID)]
 			if !ok {
@@ -172,30 +209,49 @@ func (d *Docker) handleRequestSetPendingAction(r *dto.RequestSetPendingAction) {
 				return nil
 			}
 
-			c.Command <- ContainerCommand{
+			select {
+			case c.Command <- ContainerCommand{
 				functor: func(container *Container) {
 					container.SetPendingAction(r.PendingAction)
 				},
+			}:
+				r.Response <- true
+			case <-time.After(channelTimeout):
+				r.Response <- false
 			}
-
-			r.Response <- true
 			return nil
 		},
+	}:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout sending to containersCommand in handleRequestSetPendingAction")
+		r.Response <- false
 	}
 }
 
 func (d *Docker) handleRequestProjectList(r *dto.RequestProjectList) {
-	d.containersCommand <- ContainersCommand{
+	select {
+	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			projects := make(map[dto.ProjectID]dto.Project)
 
 			for _, c := range docker.containers {
 				response := make(chan ContainerResponse)
-				c.Command <- ContainerCommand{
+				select {
+				case c.Command <- ContainerCommand{
 					response: response,
+				}:
+				case <-time.After(channelTimeout):
+					// Skip this container if timeout
+					continue
 				}
 
-				container := <-response
+				var container ContainerResponse
+				select {
+				case container = <-response:
+				case <-time.After(channelTimeout):
+					// Skip this container if timeout
+					continue
+				}
 
 				// We should copy the data to avoid data race
 				projectID := dto.ProjectID(container.Project.ID)
@@ -232,6 +288,10 @@ func (d *Docker) handleRequestProjectList(r *dto.RequestProjectList) {
 
 			return nil
 		},
+	}:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout sending to containersCommand in handleRequestProjectList")
+		r.Response <- nil
 	}
 }
 
@@ -307,7 +367,8 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		select {
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "collectContainerLogs context is done", slog.String("container_id", string(c.ID)))
-			pr.Close() // Unblock reader goroutine
+			out.Close() // Unblock stdcopy goroutine
+			pr.Close()  // Unblock reader goroutine
 			return
 		case line, ok := <-lines:
 			if !ok {
@@ -324,6 +385,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 			case <-time.After(time.Second):
 				// Timeout sending log, container might be busy or deleted
 			case <-ctx.Done():
+				out.Close()
 				pr.Close()
 				return
 			}
@@ -333,6 +395,9 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 
 // dockerAPITimeout is the timeout for one-shot Docker API calls
 const dockerAPITimeout = 30 * time.Second
+
+// channelTimeout is the timeout for channel operations to prevent deadlock
+const channelTimeout = 5 * time.Second
 
 func (d *Docker) collectContainers(ctx context.Context) error {
 	listCtx, cancel := context.WithTimeout(ctx, dockerAPITimeout)
@@ -367,14 +432,30 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	}
 
 	response := make(chan *Container)
-	d.containersCommand <- ContainersCommand{
+	select {
+	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			return docker.containers[ContainerID(dockerContainer.ID)]
 		},
 		response: response,
+	}:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout sending to containersCommand in createContainer (check)")
+		return
+	case <-ctx.Done():
+		return
 	}
 
-	c := <-response
+	var c *Container
+	select {
+	case c = <-response:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout waiting for response in createContainer (check)")
+		return
+	case <-ctx.Done():
+		return
+	}
+
 	if c != nil {
 		// Container already exists
 		return
@@ -382,12 +463,18 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 
 	c = NewContainer(ctx, dockerContainer, action, project, d.logger)
 
-	d.containersCommand <- ContainersCommand{
+	select {
+	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			docker.containers[c.ID] = c
-
 			return nil
 		},
+	}:
+	case <-time.After(channelTimeout):
+		d.logger.Warn("timeout sending to containersCommand in createContainer (insert)")
+		return
+	case <-ctx.Done():
+		return
 	}
 
 	go d.getContainerStatsRealtime(ctx, c)
@@ -399,10 +486,15 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 
 		// Mark container as exited instead of deleting
-		c.Command <- ContainerCommand{
+		select {
+		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
 				container.Status = "exited"
 			},
+		}:
+		case <-time.After(channelTimeout):
+			d.logger.Warn("timeout sending exited status in getContainerStatsRealtime")
+		case <-ctx.Done():
 		}
 
 		return
@@ -411,10 +503,14 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 	defer dockerContainerStats.Body.Close()
 	defer func() {
 		// Mark container as exited when stats streaming ends
-		c.Command <- ContainerCommand{
+		select {
+		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
 				container.Status = "exited"
 			},
+		}:
+		case <-time.After(channelTimeout):
+			d.logger.Warn("timeout sending exited status in getContainerStatsRealtime defer")
 		}
 		d.logger.DebugContext(ctx, "container stopped (stats ended)", slog.String("container_id", string(c.ID)))
 	}()
@@ -435,10 +531,16 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		}
 
 		s := stats
-		c.Command <- ContainerCommand{
+		select {
+		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
 				container.Update(s)
 			},
+		}:
+		case <-time.After(channelTimeout):
+			// Skip this stats update if timeout
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -481,30 +583,56 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			d.logger.DebugContext(ctx, "event", slog.String("action", string(msg.Action)), slog.String("container_id", msg.Actor.ID))
 
 			response := make(chan *Container)
-			d.containersCommand <- ContainersCommand{
+			select {
+			case d.containersCommand <- ContainersCommand{
 				functor: func(docker *Docker) *Container {
 					return docker.containers[ContainerID(msg.Actor.ID)]
 				},
 				response: response,
+			}:
+			case <-time.After(channelTimeout):
+				d.logger.Warn("timeout sending to containersCommand in handleEvents")
+				continue
+			case <-ctx.Done():
+				return
 			}
 
-			c := <-response
+			var c *Container
+			select {
+			case c = <-response:
+			case <-time.After(channelTimeout):
+				d.logger.Warn("timeout waiting for response in handleEvents")
+				continue
+			case <-ctx.Done():
+				return
+			}
 
 			if c != nil {
-				c.Command <- ContainerCommand{
+				select {
+				case c.Command <- ContainerCommand{
 					functor: func(container *Container) {
 						container.SetStatusFromAction(msg.Action)
 					},
+				}:
+				case <-time.After(channelTimeout):
+					d.logger.Warn("timeout sending status update in handleEvents")
+				case <-ctx.Done():
+					return
 				}
 
 				if msg.Action == events.ActionDestroy {
-					d.containersCommand <- ContainersCommand{
+					select {
+					case d.containersCommand <- ContainersCommand{
 						functor: func(docker *Docker) *Container {
 							delete(docker.containers, c.ID)
 							c.Delete()
-
 							return nil
 						},
+					}:
+					case <-time.After(channelTimeout):
+						d.logger.Warn("timeout sending destroy command in handleEvents")
+					case <-ctx.Done():
+						return
 					}
 				}
 

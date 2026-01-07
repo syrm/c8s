@@ -20,7 +20,9 @@ func containerToDTO(c *Container, includeLogs bool, logCancel context.CancelFunc
 	}
 
 	if includeLogs {
-		d.Logs = c.Logs
+		// Copy logs to avoid race conditions if container continues adding logs
+		d.Logs = make([]string, len(c.Logs))
+		copy(d.Logs, c.Logs)
 		d.LogCancel = logCancel
 	}
 

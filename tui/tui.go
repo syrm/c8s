@@ -26,6 +26,7 @@ type Tui struct {
 	projectSearchInput         *tview.InputField
 	projectSearchActive        bool
 	projectSearchQuery         string
+	projectSearchQueryLock     sync.RWMutex
 	projectLayout              *tview.Flex
 	tableContainer             *tview.Table
 	tableContainerData         map[dto.ContainerID]dto.Container
@@ -33,6 +34,7 @@ type Tui struct {
 	containerSearchInput       *tview.InputField
 	containerSearchActive      bool
 	containerSearchQuery       string
+	containerSearchQueryLock   sync.RWMutex
 	containerLayout            *tview.Flex
 	statusBar                  *tview.TextView
 	tableContainerLog          *tview.TextView
@@ -291,7 +293,7 @@ func (t *Tui) drawProjects() {
 	}
 	t.tableProjectDataLock.RUnlock()
 
-	projects = filterProjects(projects, t.projectSearchQuery)
+	projects = filterProjects(projects, t.getProjectSearchQuery())
 	slices.SortStableFunc(projects, func(a, b dto.Project) int {
 		return compareProjects(a, b, t.projectSortColumn, t.projectSortAsc)
 	})
@@ -373,7 +375,7 @@ func (t *Tui) drawContainers() {
 		}
 
 		// Filter by search query
-		if !fuzzyMatch(container.Service, t.containerSearchQuery) {
+		if !fuzzyMatch(container.Service, t.getContainerSearchQuery()) {
 			continue
 		}
 

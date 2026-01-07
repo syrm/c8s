@@ -4,7 +4,8 @@ import "fmt"
 
 // getProjectName returns the name of the current project, or "unknown" if not found.
 func (t *Tui) getProjectName() string {
-	if t.currentProjectID == "" {
+	currentProjectID := t.getCurrentProjectID()
+	if currentProjectID == "" {
 		return "unknown"
 	}
 
@@ -12,7 +13,7 @@ func (t *Tui) getProjectName() string {
 	defer t.tableProjectDataLock.RUnlock()
 
 	for _, project := range t.tableProjectData {
-		if string(project.ID) == t.currentProjectID {
+		if string(project.ID) == currentProjectID {
 			return project.Name
 		}
 	}
@@ -45,8 +46,9 @@ func (t *Tui) buildProjectListHeader() string {
 	t.tableProjectDataLock.RUnlock()
 
 	filter := ""
-	if t.projectSearchQuery != "" {
-		filter = fmt.Sprintf(" [white](filter: %s)[-]", t.projectSearchQuery)
+	projectSearchQuery := t.getProjectSearchQuery()
+	if projectSearchQuery != "" {
+		filter = fmt.Sprintf(" [white](filter: %s)[-]", projectSearchQuery)
 	}
 
 	t.projectRefreshPausedLock.RLock()
@@ -68,8 +70,9 @@ func (t *Tui) buildContainerListHeader() string {
 	projectName := t.getProjectName()
 
 	filter := ""
-	if t.containerSearchQuery != "" {
-		filter = fmt.Sprintf(" [white](filter: %s)[-]", t.containerSearchQuery)
+	containerSearchQuery := t.getContainerSearchQuery()
+	if containerSearchQuery != "" {
+		filter = fmt.Sprintf(" [white](filter: %s)[-]", containerSearchQuery)
 	}
 
 	t.containerRefreshPausedLock.RLock()
@@ -106,7 +109,8 @@ func (t *Tui) buildLogViewHeader() string {
 	t.logShowTimestampLock.RUnlock()
 
 	projectName := t.getProjectName()
+	containerService := t.getCurrentContainerService()
 
 	return fmt.Sprintf(" [white::b]c8s[-::] [white]|[-] [white]Logs[-] [white]%s[-] [white](%s)[-]%s",
-		t.currentContainerService, projectName, status)
+		containerService, projectName, status)
 }
