@@ -112,16 +112,22 @@ func (t *Tui) enterContainerView() {
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
+	var found bool
 	t.tableProjectDataLock.RLock()
 	for _, project := range t.tableProjectData {
 		if cellText == project.Name {
 			t.setCurrentProjectID(string(project.ID))
 			t.setCurrentProjectName(project.Name)
 			t.setCurrentView(viewProject)
+			found = true
 			break
 		}
 	}
 	t.tableProjectDataLock.RUnlock()
+
+	if !found {
+		return
+	}
 
 	t.setContainerSearchQuery("")
 	t.containerSearchInput.SetText("")
@@ -232,14 +238,21 @@ func (t *Tui) enterLogView() {
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
+	var found bool
 	t.tableContainerDataLock.RLock()
 	for _, container := range t.tableContainerData {
 		if cellText == container.Service {
 			t.setCurrentContainerInfo(string(container.ID), container.Name, container.Service)
+			found = true
 			break
 		}
 	}
 	t.tableContainerDataLock.RUnlock()
+
+	if !found {
+		return
+	}
+
 	t.drawContainerLog()
 	t.pages.SwitchToPage("logs")
 	t.setCurrentView(viewContainerLog)
