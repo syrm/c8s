@@ -8,6 +8,18 @@ import (
 	"time"
 )
 
+// Common timestamp formats for parsing log timestamps
+var timestampFormats = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02T15:04:05Z07:00",
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+}
+
 // formatJSONLog parses a JSON log line and formats it for display.
 // Returns the formatted line and whether parsing was successful.
 func formatJSONLog(line string, showTimestamp bool) (string, bool) {
@@ -97,23 +109,11 @@ func formatJSONLog(line string, showTimestamp bool) (string, bool) {
 
 // formatTimestamp converts various timestamp formats to RFC3339Nano.
 func formatTimestamp(ts string) string {
-	formats := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05.999999999Z07:00",
-		"2006-01-02T15:04:05.999999999",
-		"2006-01-02T15:04:05Z07:00",
-		"2006-01-02T15:04:05",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05",
-	}
-
-	for _, format := range formats {
+	for _, format := range timestampFormats {
 		if t, err := time.Parse(format, ts); err == nil {
 			return t.Format(time.RFC3339Nano)
 		}
 	}
-
 	return ts
 }
 
@@ -154,18 +154,7 @@ func extractTimestampPrefix(s string) (timestamp string, rest string, found bool
 
 	potentialTs := s[:spaceIdx]
 
-	formats := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05.999999999Z07:00",
-		"2006-01-02T15:04:05.999999999",
-		"2006-01-02T15:04:05Z07:00",
-		"2006-01-02T15:04:05",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05",
-	}
-
-	for _, format := range formats {
+	for _, format := range timestampFormats {
 		if _, err := time.Parse(format, potentialTs); err == nil {
 			return potentialTs, s[spaceIdx+1:], true
 		}

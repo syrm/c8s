@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -53,7 +54,7 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 // setPendingAction sends a request to set a pending action on a container.
 func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
 	response := make(chan bool)
-	t.requestData <- &RequestSetPendingAction{
+	t.requestData <- &dto.RequestSetPendingAction{
 		ContainerID:   containerID,
 		PendingAction: action,
 		Response:      response,
@@ -103,7 +104,11 @@ func (t *Tui) handleContainerStop() bool {
 
 	go func() {
 		cmd := exec.Command("docker", "stop", string(container.ID))
-		_ = cmd.Run()
+		if err := cmd.Run(); err != nil {
+			t.app.QueueUpdateDraw(func() {
+				t.showStatusMessage(fmt.Sprintf("Failed to stop container: %v", err))
+			})
+		}
 	}()
 	return true
 }
@@ -128,12 +133,16 @@ func (t *Tui) handleContainerRestart() bool {
 	t.drawContainers()
 
 	go func() {
+		var cmd *exec.Cmd
 		if container.Status == "running" {
-			cmd := exec.Command("docker", "restart", string(container.ID))
-			_ = cmd.Run()
+			cmd = exec.Command("docker", "restart", string(container.ID))
 		} else {
-			cmd := exec.Command("docker", "start", string(container.ID))
-			_ = cmd.Run()
+			cmd = exec.Command("docker", "start", string(container.ID))
+		}
+		if err := cmd.Run(); err != nil {
+			t.app.QueueUpdateDraw(func() {
+				t.showStatusMessage(fmt.Sprintf("Failed to %s container: %v", action[:len(action)-3], err))
+			})
 		}
 	}()
 	return true
@@ -153,7 +162,11 @@ func (t *Tui) handleContainerRemove() bool {
 
 	go func() {
 		cmd := exec.Command("docker", "rm", string(container.ID))
-		_ = cmd.Run()
+		if err := cmd.Run(); err != nil {
+			t.app.QueueUpdateDraw(func() {
+				t.showStatusMessage(fmt.Sprintf("Failed to remove container: %v", err))
+			})
+		}
 	}()
 	return true
 }

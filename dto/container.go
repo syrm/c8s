@@ -4,10 +4,6 @@ import "context"
 
 type ContainerID string
 
-type ContainerDeletable interface {
-	Deleted() bool
-}
-
 type Container struct {
 	ID               ContainerID
 	Project          ContainerProject
@@ -19,18 +15,6 @@ type Container struct {
 	Status           string
 	PendingAction    string // "starting", "stopping", "restarting", "removing" or ""
 	LogCancel        context.CancelFunc
-}
-
-func (c Container) Deleted() bool {
-	return false
-}
-
-type ContainerDeleted struct {
-	ID ContainerID
-}
-
-func (c ContainerDeleted) Deleted() bool {
-	return true
 }
 
 type ContainerProject struct {

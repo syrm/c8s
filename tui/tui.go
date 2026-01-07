@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -18,37 +17,6 @@ import (
 	"github.com/rivo/tview"
 )
 
-type RequestData interface {
-	isRequestData()
-}
-
-type RequestProjectList struct {
-	Response chan []dto.Project
-}
-
-func (p *RequestProjectList) isRequestData() {}
-
-type RequestContainerLog struct {
-	ContainerID dto.ContainerID
-	Response    chan dto.Container
-}
-
-func (p *RequestContainerLog) isRequestData() {}
-
-type RequestProject struct {
-	ProjectID dto.ProjectID
-	Response  chan []dto.Container
-}
-
-func (p *RequestProject) isRequestData() {}
-
-type RequestSetPendingAction struct {
-	ContainerID   dto.ContainerID
-	PendingAction string
-	Response      chan bool
-}
-
-func (p *RequestSetPendingAction) isRequestData() {}
 
 type Tui struct {
 	app                        *tview.Application
@@ -105,7 +73,7 @@ type Tui struct {
 	helpModal                  *tview.Grid
 	helpTextView               *tview.TextView
 	headerView                 *tview.TextView
-	requestData                chan RequestData
+	requestData                chan dto.RequestData
 	logger                     *slog.Logger
 }
 
@@ -223,7 +191,7 @@ func NewTui(logger *slog.Logger) *Tui {
 		helpModal:                 helpModal,
 		helpTextView:              helpTextView,
 		headerView:                headerView,
-		requestData:               make(chan RequestData),
+		requestData:               make(chan dto.RequestData),
 		currentView:               viewProjectList,
 		projectSortColumn:         projectSortCPU,
 		projectSortAsc:            false,
@@ -323,9 +291,8 @@ func (t *Tui) drawProjects() {
 	t.tableProject.Clear()
 	t.RenderProjectHeader()
 
-	offset := 0
 	for index, project := range projects {
-		rowIndex := index + 1 + offset
+		rowIndex := index + 1
 
 		// Column 0: Project name with warning symbol if needed
 		projectName := project.Name
@@ -370,11 +337,18 @@ func (t *Tui) drawProjects() {
 }
 
 func (t *Tui) drawContainers() {
+	// Copy data under lock to avoid race conditions
 	t.tableContainerDataLock.RLock()
-	containers := slices.SortedStableFunc(maps.Values(t.tableContainerData), func(a, b dto.Container) int {
+	containers := make([]dto.Container, 0, len(t.tableContainerData))
+	for _, c := range t.tableContainerData {
+		containers = append(containers, c)
+	}
+	t.tableContainerDataLock.RUnlock()
+
+	// Sort the copied data (no lock needed)
+	slices.SortStableFunc(containers, func(a, b dto.Container) int {
 		return compareContainers(a, b, t.containerSortColumn, t.containerSortAsc)
 	})
-	t.tableContainerDataLock.RUnlock()
 
 	t.tableContainer.Clear()
 	t.tableProjectDataLock.RLock()
@@ -478,17 +452,9 @@ func (t *Tui) drawContainers() {
 func (t *Tui) drawContainerLog() {
 	t.tableContainerLog.Clear()
 
-	t.logPausedLock.RLock()
-	paused := t.logPaused
-	t.logPausedLock.RUnlock()
-
-	t.logFilterLock.RLock()
-	filter := t.logFilter
-	t.logFilterLock.RUnlock()
-
-	t.logShowTimestampLock.RLock()
-	showTimestamp := t.logShowTimestamp
-	t.logShowTimestampLock.RUnlock()
+	paused := t.getLogPaused()
+	filter := t.getLogFilter()
+	showTimestamp := t.getLogShowTimestamp()
 
 	statusIndicators := ""
 	if paused {
@@ -604,7 +570,7 @@ func (t *Tui) pauseProjectRefresh() {
 	t.projectRefreshTimerLock.Unlock()
 }
 
-func (t *Tui) GetRequestData() <-chan RequestData {
+func (t *Tui) GetRequestData() <-chan dto.RequestData {
 	return t.requestData
 }
 
@@ -620,264 +586,259 @@ func (t *Tui) getData(ctx context.Context) {
 			return
 
 		case <-ticker.C:
-			t.currentViewLock.RLock()
-			cv := t.currentView
-			t.currentViewLock.RUnlock()
+			cv := t.getCurrentView()
 			switch cv {
 			case viewProjectList:
 				if ctxCancel != nil {
 					ctxCancel()
 					ctxCancel = nil
 				}
+				t.refreshProjectList()
 
-				t.projectRefreshPausedLock.RLock()
-				paused := t.projectRefreshPaused
-				t.projectRefreshPausedLock.RUnlock()
-
-				if paused {
-					continue
-				}
-
-				response := make(chan []dto.Project)
-				t.requestData <- &RequestProjectList{
-					Response: response,
-				}
-
-				projects := <-response
-				t.tableProjectDataLock.Lock()
-				t.tableProjectData = make(map[dto.ProjectID]dto.Project)
-				for _, p := range projects {
-					t.tableProjectData[p.ID] = p
-				}
-				t.tableProjectDataLock.Unlock()
-
-				t.app.QueueUpdateDraw(func() {
-					t.drawProjects()
-				})
 			case viewProject:
 				if ctxCancel != nil {
 					ctxCancel()
 					ctxCancel = nil
 				}
-
-				t.containerRefreshPausedLock.RLock()
-				paused := t.containerRefreshPaused
-				t.containerRefreshPausedLock.RUnlock()
-
-				if paused {
-					continue
-				}
-
-				response := make(chan []dto.Container)
-				t.requestData <- &RequestProject{
-					ProjectID: dto.ProjectID(t.currentProjectID),
-					Response:  response,
-				}
-
-				containers := <-response
-				t.tableContainerDataLock.Lock()
-				t.tableContainerData = make(map[dto.ContainerID]dto.Container)
-				for _, c := range containers {
-					t.tableContainerData[c.ID] = c
-				}
-				t.tableContainerDataLock.Unlock()
-
-				t.app.QueueUpdateDraw(func() {
-					t.drawContainers()
-				})
+				t.refreshContainerList()
 
 			case viewContainerLog:
-				t.logPausedLock.RLock()
-				paused := t.logPaused
-				t.logPausedLock.RUnlock()
-
-				if paused {
-					continue
-				}
-
-				t.containerDisappearedLock.RLock()
-				disappeared := t.containerDisappeared
-				t.containerDisappearedLock.RUnlock()
-
-				if disappeared {
-					// If we haven't started log collection yet for the reappeared container
-					if ctxCancel == nil {
-						// Try to find a container with same service name and project
-						t.logger.InfoContext(ctx, "checking for container reappearance",
-							slog.String("service", t.currentContainerService),
-							slog.String("project", t.currentProjectID))
-
-						responseProject := make(chan []dto.Container)
-						t.requestData <- &RequestProject{
-							ProjectID: dto.ProjectID(t.currentProjectID),
-							Response:  responseProject,
-						}
-						containers := <-responseProject
-
-						var foundContainer *dto.Container
-						for _, container := range containers {
-							t.logger.InfoContext(ctx, "checking container",
-								slog.String("container_service", container.Service),
-								slog.String("looking_for", t.currentContainerService))
-							if container.Service == t.currentContainerService && string(container.Project.ID) == t.currentProjectID {
-								foundContainer = &container
-								break
-							}
-						}
-
-						if foundContainer != nil {
-							// Container reappeared! Start log collection ONCE
-							t.logger.InfoContext(ctx, "container reappeared, starting log collection",
-								slog.String("service", foundContainer.Service),
-								slog.String("new_id", string(foundContainer.ID)))
-
-							t.currentContainerID = string(foundContainer.ID)
-							t.currentContainerName = foundContainer.Name
-
-							// Start log collection for the new container
-							response := make(chan dto.Container)
-							t.requestData <- &RequestContainerLog{
-								ContainerID: dto.ContainerID(t.currentContainerID),
-								Response:    response,
-							}
-							c := <-response
-
-							if c.ID == "" {
-								// Still not available, keep waiting
-								t.logger.InfoContext(ctx, "container reappeared but logs not ready yet")
-								continue
-							}
-
-							// Got container, save LogCancel
-							ctxCancel = c.LogCancel
-							t.logger.InfoContext(ctx, "log collection started, waiting for logs...")
-						}
-
-						// Still disappeared or just started log collection, continue waiting
-						continue
-					}
-
-					// Log collection is running, check if we have logs now
-					response := make(chan dto.Container)
-					t.requestData <- &RequestContainerLog{
-						ContainerID: dto.ContainerID(t.currentContainerID),
-						Response:    response,
-					}
-					c := <-response
-
-					if c.ID == "" {
-						// Container disappeared again!
-						t.logger.InfoContext(ctx, "container disappeared again")
-						if ctxCancel != nil {
-							ctxCancel()
-							ctxCancel = nil
-						}
-						continue
-					}
-
-					// Wait until we have actual logs before hiding the modal
-					if len(c.Logs) == 0 {
-						t.logger.InfoContext(ctx, "still waiting for logs...")
-						continue
-					}
-
-					// We have logs! Update them and close the modal
-					t.logger.InfoContext(ctx, "got logs, closing modal", slog.Int("log_count", len(c.Logs)))
-
-					t.containerDisappearedLock.Lock()
-					t.containerDisappeared = false
-					t.containerDisappearedLock.Unlock()
-
-					// Update logs BEFORE queuing the draw
-					t.tableContainerLogData = c.Logs
-
-					t.app.QueueUpdateDraw(func() {
-						t.drawContainerLog()
-						t.pages.HidePage("modal")
-					})
-
-					// Continue to next cycle
-					continue
-				}
-
-				t.logger.InfoContext(ctx, "fetching logs for container", slog.String("container_id", t.currentContainerID))
-
-				// First time we enter this view, start the log collection
-				if ctxCancel == nil {
-					response := make(chan dto.Container)
-					t.requestData <- &RequestContainerLog{
-						ContainerID: dto.ContainerID(t.currentContainerID),
-						Response:    response,
-					}
-					c := <-response
-					if c.ID == "" {
-						// Container no longer exists, show modal
-						containerName := t.currentContainerName
-						containerID := t.currentContainerID
-
-						t.containerDisappearedLock.Lock()
-						t.containerDisappeared = true
-						t.containerDisappearedLock.Unlock()
-
-						t.app.QueueUpdateDraw(func() {
-							t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
-							t.pages.ShowPage("modal")
-						})
-						continue
-					}
-					ctxCancel = c.LogCancel
-					// Skip the immediate second request on first start
-					continue
-				}
-
-				// Get the latest logs (only when ctxCancel is already set)
-				response := make(chan dto.Container)
-				t.requestData <- &RequestContainerLog{
-					ContainerID: dto.ContainerID(t.currentContainerID),
-					Response:    response,
-				}
-
-				c := <-response
-
-				if c.ID == "" {
-					// Container no longer exists, show modal
-					if ctxCancel != nil {
-						ctxCancel()
-						ctxCancel = nil
-					}
-
-					containerName := t.currentContainerName
-					containerID := t.currentContainerID
-
-					t.containerDisappearedLock.Lock()
-					t.containerDisappeared = true
-					t.containerDisappearedLock.Unlock()
-
-					t.app.QueueUpdateDraw(func() {
-						t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
-						t.pages.ShowPage("modal")
-					})
-					continue
-				}
-
-				// Only update logs if we have some (don't erase existing logs with empty array)
-				if len(c.Logs) > 0 {
-					t.tableContainerLogData = c.Logs
-				}
-
-				t.app.QueueUpdateDraw(func() {
-					t.drawContainerLog()
-				})
+				ctxCancel = t.refreshContainerLog(ctx, ctxCancel)
 			}
 		}
 	}
 }
 
-func (t *Tui) Render(ctx context.Context) {
+func (t *Tui) refreshProjectList() {
+	if t.getProjectRefreshPaused() {
+		return
+	}
+
+	response := make(chan []dto.Project)
+	t.requestData <- &dto.RequestProjectList{
+		Response: response,
+	}
+
+	projects := <-response
+	t.tableProjectDataLock.Lock()
+	t.tableProjectData = make(map[dto.ProjectID]dto.Project)
+	for _, p := range projects {
+		t.tableProjectData[p.ID] = p
+	}
+	t.tableProjectDataLock.Unlock()
+
+	t.app.QueueUpdateDraw(func() {
+		t.drawProjects()
+	})
+}
+
+func (t *Tui) refreshContainerList() {
+	if t.getContainerRefreshPaused() {
+		return
+	}
+
+	response := make(chan []dto.Container)
+	t.requestData <- &dto.RequestProject{
+		ProjectID: dto.ProjectID(t.currentProjectID),
+		Response:  response,
+	}
+
+	containers := <-response
+	t.tableContainerDataLock.Lock()
+	t.tableContainerData = make(map[dto.ContainerID]dto.Container)
+	for _, c := range containers {
+		t.tableContainerData[c.ID] = c
+	}
+	t.tableContainerDataLock.Unlock()
+
+	t.app.QueueUpdateDraw(func() {
+		t.drawContainers()
+	})
+}
+
+func (t *Tui) refreshContainerLog(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
+	if t.getLogPaused() {
+		return ctxCancel
+	}
+
+	if t.getContainerDisappeared() {
+		return t.handleDisappearedContainer(ctx, ctxCancel)
+	}
+
+	t.logger.InfoContext(ctx, "fetching logs for container", slog.String("container_id", t.currentContainerID))
+
+	// First time we enter this view, start the log collection
+	if ctxCancel == nil {
+		return t.startLogCollection(ctx)
+	}
+
+	// Get the latest logs (only when ctxCancel is already set)
+	return t.updateLogs(ctx, ctxCancel)
+}
+
+func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
+	// If we haven't started log collection yet for the reappeared container
+	if ctxCancel == nil {
+		return t.tryReconnectContainer(ctx)
+	}
+
+	// Log collection is running, check if we have logs now
+	response := make(chan dto.Container)
+	t.requestData <- &dto.RequestContainerLog{
+		ContainerID: dto.ContainerID(t.currentContainerID),
+		Response:    response,
+	}
+	c := <-response
+
+	if c.ID == "" {
+		// Container disappeared again!
+		t.logger.InfoContext(ctx, "container disappeared again")
+		if ctxCancel != nil {
+			ctxCancel()
+		}
+		return nil
+	}
+
+	// Wait until we have actual logs before hiding the modal
+	if len(c.Logs) == 0 {
+		t.logger.InfoContext(ctx, "still waiting for logs...")
+		return ctxCancel
+	}
+
+	// We have logs! Update them and close the modal
+	t.logger.InfoContext(ctx, "got logs, closing modal", slog.Int("log_count", len(c.Logs)))
+	t.setContainerDisappeared(false)
+	t.tableContainerLogData = c.Logs
+
+	t.app.QueueUpdateDraw(func() {
+		t.drawContainerLog()
+		t.pages.HidePage("modal")
+	})
+
+	return ctxCancel
+}
+
+func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
+	t.logger.InfoContext(ctx, "checking for container reappearance",
+		slog.String("service", t.currentContainerService),
+		slog.String("project", t.currentProjectID))
+
+	responseProject := make(chan []dto.Container)
+	t.requestData <- &dto.RequestProject{
+		ProjectID: dto.ProjectID(t.currentProjectID),
+		Response:  responseProject,
+	}
+	containers := <-responseProject
+
+	var foundContainer *dto.Container
+	for _, container := range containers {
+		t.logger.InfoContext(ctx, "checking container",
+			slog.String("container_service", container.Service),
+			slog.String("looking_for", t.currentContainerService))
+		if container.Service == t.currentContainerService && string(container.Project.ID) == t.currentProjectID {
+			foundContainer = &container
+			break
+		}
+	}
+
+	if foundContainer == nil {
+		return nil
+	}
+
+	// Container reappeared! Start log collection ONCE
+	t.logger.InfoContext(ctx, "container reappeared, starting log collection",
+		slog.String("service", foundContainer.Service),
+		slog.String("new_id", string(foundContainer.ID)))
+
+	t.currentContainerID = string(foundContainer.ID)
+	t.currentContainerName = foundContainer.Name
+
+	// Start log collection for the new container
+	response := make(chan dto.Container)
+	t.requestData <- &dto.RequestContainerLog{
+		ContainerID: dto.ContainerID(t.currentContainerID),
+		Response:    response,
+	}
+	c := <-response
+
+	if c.ID == "" {
+		t.logger.InfoContext(ctx, "container reappeared but logs not ready yet")
+		return nil
+	}
+
+	t.logger.InfoContext(ctx, "log collection started, waiting for logs...")
+	return c.LogCancel
+}
+
+func (t *Tui) startLogCollection(ctx context.Context) context.CancelFunc {
+	response := make(chan dto.Container)
+	t.requestData <- &dto.RequestContainerLog{
+		ContainerID: dto.ContainerID(t.currentContainerID),
+		Response:    response,
+	}
+	c := <-response
+
+	if c.ID == "" {
+		// Container no longer exists, show modal
+		containerName := t.currentContainerName
+		containerID := t.currentContainerID
+
+		t.setContainerDisappeared(true)
+
+		t.app.QueueUpdateDraw(func() {
+			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
+			t.pages.ShowPage("modal")
+		})
+		return nil
+	}
+	return c.LogCancel
+}
+
+func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
+	response := make(chan dto.Container)
+	t.requestData <- &dto.RequestContainerLog{
+		ContainerID: dto.ContainerID(t.currentContainerID),
+		Response:    response,
+	}
+
+	c := <-response
+
+	if c.ID == "" {
+		// Container no longer exists, show modal
+		if ctxCancel != nil {
+			ctxCancel()
+		}
+
+		containerName := t.currentContainerName
+		containerID := t.currentContainerID
+
+		t.setContainerDisappeared(true)
+
+		t.app.QueueUpdateDraw(func() {
+			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", containerName, containerID[:12]))
+			t.pages.ShowPage("modal")
+		})
+		return nil
+	}
+
+	// Only update logs if we have some (don't erase existing logs with empty array)
+	if len(c.Logs) > 0 {
+		t.tableContainerLogData = c.Logs
+	}
+
+	t.app.QueueUpdateDraw(func() {
+		t.drawContainerLog()
+	})
+
+	return ctxCancel
+}
+
+func (t *Tui) Render(ctx context.Context) error {
 	go t.getData(ctx)
 
 	if err := t.app.SetRoot(t.pages, true).EnableMouse(true).Run(); err != nil {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
-		os.Exit(1)
+		return err
 	}
+	return nil
 }

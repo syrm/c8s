@@ -16,11 +16,14 @@ func fuzzyMatch(text, query string) bool {
 	textLower := strings.ToLower(text)
 	queryLower := strings.ToLower(query)
 
+	// Convert to runes for proper Unicode handling
+	textRunes := []rune(textLower)
 	textIdx := 0
+
 	for _, queryChar := range queryLower {
 		found := false
-		for textIdx < len(textLower) {
-			if rune(textLower[textIdx]) == queryChar {
+		for textIdx < len(textRunes) {
+			if textRunes[textIdx] == queryChar {
 				found = true
 				textIdx++
 				break

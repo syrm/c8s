@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"os"
 	"slices"
 	"time"
 
@@ -21,7 +20,6 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/syrm/c8s/dto"
-	"github.com/syrm/c8s/tui"
 )
 
 type ContainersCommand struct {
@@ -33,28 +31,29 @@ type Docker struct {
 	client            *dockerClient.Client
 	containers        map[ContainerID]*Container
 	containersCommand chan ContainersCommand
-	requestData       <-chan tui.RequestData
+	requestData       <-chan dto.RequestData
 	logger            *slog.Logger
 }
 
 func NewDocker(
 	ctx context.Context,
-	requestData <-chan tui.RequestData,
+	requestData <-chan dto.RequestData,
 	logger *slog.Logger,
-) *Docker {
+) (*Docker, error) {
 	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.ErrorContext(ctx, "error creating docker client", slog.Any("error", err))
-		os.Exit(1)
+		return nil, err
 	}
 
 	return &Docker{
 		client:            cli,
+		// Pre-allocate map for typical Docker Compose setups (usually < 256 containers)
 		containers:        make(map[ContainerID]*Container, 256),
 		containersCommand: make(chan ContainersCommand),
 		requestData:       requestData,
 		logger:            logger,
-	}
+	}, nil
 }
 
 func (d *Docker) Run(ctx context.Context) {
@@ -92,7 +91,7 @@ func (d *Docker) handleRequests(ctx context.Context) {
 		case req := <-d.requestData:
 			switch r := req.(type) {
 
-			case *tui.RequestContainerLog:
+			case *dto.RequestContainerLog:
 				ctxLog, cancel := context.WithCancel(ctx)
 				c := d.handleRequestContainerLog(ctxLog, r)
 				if c == nil {
@@ -102,20 +101,20 @@ func (d *Docker) handleRequests(ctx context.Context) {
 				}
 				r.Response <- containerToDTO(c, true, cancel)
 
-			case *tui.RequestProject:
+			case *dto.RequestProject:
 				d.handleRequestContainerProject(r)
 
-			case *tui.RequestSetPendingAction:
+			case *dto.RequestSetPendingAction:
 				d.handleRequestSetPendingAction(r)
 
-			case *tui.RequestProjectList:
+			case *dto.RequestProjectList:
 				d.handleRequestProjectList(r)
 			}
 		}
 	}
 }
 
-func (d *Docker) handleRequestContainerLog(ctx context.Context, r *tui.RequestContainerLog) *Container {
+func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) *Container {
 	response := make(chan *Container)
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
@@ -138,7 +137,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *tui.RequestCo
 	return c
 }
 
-func (d *Docker) handleRequestContainerProject(r *tui.RequestProject) {
+func (d *Docker) handleRequestContainerProject(r *dto.RequestProject) {
 	var containers []dto.Container
 
 	d.containersCommand <- ContainersCommand{
@@ -159,7 +158,7 @@ func (d *Docker) handleRequestContainerProject(r *tui.RequestProject) {
 	}
 }
 
-func (d *Docker) handleRequestSetPendingAction(r *tui.RequestSetPendingAction) {
+func (d *Docker) handleRequestSetPendingAction(r *dto.RequestSetPendingAction) {
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			c, ok := docker.containers[ContainerID(r.ContainerID)]
@@ -180,7 +179,7 @@ func (d *Docker) handleRequestSetPendingAction(r *tui.RequestSetPendingAction) {
 	}
 }
 
-func (d *Docker) handleRequestProjectList(r *tui.RequestProjectList) {
+func (d *Docker) handleRequestProjectList(r *dto.RequestProjectList) {
 	d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			projects := make(map[dto.ProjectID]dto.Project)

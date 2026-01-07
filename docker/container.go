@@ -2,7 +2,6 @@ package docker
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
 	apiContainer "github.com/docker/docker/api/types/container"
@@ -146,28 +145,6 @@ func statusFromAction(action events.Action) string {
 	}
 }
 
-func isRunningFromAction(action events.Action) (bool, error) {
-	if action == events.ActionCreate ||
-		action == events.ActionStart ||
-		action == events.ActionUnPause ||
-		action == events.ActionRestart ||
-		action == events.ActionReload {
-		return true, nil
-	}
-
-	if action == events.ActionDie ||
-		action == events.ActionStop ||
-		action == events.ActionPause ||
-		action == events.ActionKill ||
-		action == events.ActionOOM ||
-		action == events.ActionRemove ||
-		action == events.ActionDelete ||
-		action == events.ActionDestroy {
-		return false, nil
-	}
-
-	return true, errors.New("invalid action")
-}
 
 func (c *Container) Update(stats apiContainer.StatsResponse) {
 	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)

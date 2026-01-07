@@ -114,9 +114,7 @@ func (t *Tui) enterContainerView() {
 		if fuzzyMatch(cellText, project.Name) {
 			t.currentProjectID = string(project.ID)
 			t.currentProjectName = project.Name
-			t.currentViewLock.Lock()
-			t.currentView = viewProject
-			t.currentViewLock.Unlock()
+			t.setCurrentView(viewProject)
 			break
 		}
 	}
@@ -128,15 +126,8 @@ func (t *Tui) enterContainerView() {
 	t.drawContainers()
 	t.pages.SwitchToPage("containerList")
 
-	t.projectRefreshPausedLock.Lock()
-	t.projectRefreshPaused = false
-	t.projectRefreshPausedLock.Unlock()
-	t.projectRefreshTimerLock.Lock()
-	if t.projectRefreshTimer != nil {
-		t.projectRefreshTimer.Stop()
-		t.projectRefreshTimer = nil
-	}
-	t.projectRefreshTimerLock.Unlock()
+	t.setProjectRefreshPaused(false)
+	t.stopProjectRefreshTimer()
 	t.updateHeader()
 }
 
@@ -221,21 +212,12 @@ func (t *Tui) setupContainerTableHandler() {
 // exitContainerView handles navigation from container list back to project list.
 func (t *Tui) exitContainerView() {
 	t.pages.SwitchToPage("projectList")
-	t.currentViewLock.Lock()
-	t.currentView = viewProjectList
-	t.currentViewLock.Unlock()
+	t.setCurrentView(viewProjectList)
 	t.currentContainerID = ""
 	t.containerSearchQuery = ""
 	t.containerSearchInput.SetText("")
-	t.containerRefreshPausedLock.Lock()
-	t.containerRefreshPaused = false
-	t.containerRefreshPausedLock.Unlock()
-	t.containerRefreshTimerLock.Lock()
-	if t.containerRefreshTimer != nil {
-		t.containerRefreshTimer.Stop()
-		t.containerRefreshTimer = nil
-	}
-	t.containerRefreshTimerLock.Unlock()
+	t.setContainerRefreshPaused(false)
+	t.stopContainerRefreshTimer()
 	t.updateHeader()
 }
 
@@ -255,9 +237,7 @@ func (t *Tui) enterLogView() {
 	t.tableContainerDataLock.RUnlock()
 	t.drawContainerLog()
 	t.pages.SwitchToPage("logs")
-	t.currentViewLock.Lock()
-	t.currentView = viewContainerLog
-	t.currentViewLock.Unlock()
+	t.setCurrentView(viewContainerLog)
 	t.updateHeader()
 }
 
@@ -269,9 +249,7 @@ func (t *Tui) setupLogViewHandler() {
 		}
 
 		if event.Rune() == 'p' {
-			t.logPausedLock.Lock()
-			t.logPaused = !t.logPaused
-			t.logPausedLock.Unlock()
+			t.toggleLogPaused()
 			t.drawContainerLog()
 			t.updateHeader()
 		}
@@ -282,23 +260,17 @@ func (t *Tui) setupLogViewHandler() {
 		}
 
 		if event.Rune() == 'c' {
-			t.logFilterLock.Lock()
-			if t.logFilter != "" {
-				t.logFilter = ""
-				t.logFilterLock.Unlock()
+			if t.getLogFilter() != "" {
+				t.setLogFilter("")
 				t.logFilterInput.SetText("")
 				t.logLayout.RemoveItem(t.logFilterInput)
 				t.drawContainerLog()
 				t.updateHeader()
-			} else {
-				t.logFilterLock.Unlock()
 			}
 		}
 
 		if event.Rune() == 't' {
-			t.logShowTimestampLock.Lock()
-			t.logShowTimestamp = !t.logShowTimestamp
-			t.logShowTimestampLock.Unlock()
+			t.toggleLogShowTimestamp()
 			t.drawContainerLog()
 			t.updateHeader()
 		}
@@ -318,22 +290,14 @@ func (t *Tui) exitLogView() {
 	t.tableContainer.Clear()
 	t.drawContainers()
 	t.pages.SwitchToPage("containerList")
-	t.currentViewLock.Lock()
-	t.currentView = viewProject
-	t.currentViewLock.Unlock()
+	t.setCurrentView(viewProject)
 	t.currentContainerID = ""
-	t.logPausedLock.Lock()
-	t.logPaused = false
-	t.logPausedLock.Unlock()
-	t.logFilterLock.Lock()
-	t.logFilter = ""
-	t.logFilterLock.Unlock()
+	t.setLogPaused(false)
+	t.setLogFilter("")
 	t.logFilterInput.SetText("")
 	t.logLayout.RemoveItem(t.logFilterInput)
 	t.tableContainerLogData = nil
-	t.containerDisappearedLock.Lock()
-	t.containerDisappeared = false
-	t.containerDisappearedLock.Unlock()
+	t.setContainerDisappeared(false)
 	t.updateHeader()
 }
 
@@ -372,14 +336,12 @@ func (t *Tui) setupSearchCallbacks() {
 	})
 
 	t.logFilterInput.SetDoneFunc(func(key tcell.Key) {
-		t.logFilterLock.Lock()
 		if key == tcell.KeyEnter {
-			t.logFilter = t.logFilterInput.GetText()
+			t.setLogFilter(t.logFilterInput.GetText())
 		} else {
-			t.logFilter = ""
+			t.setLogFilter("")
 			t.logFilterInput.SetText("")
 		}
-		t.logFilterLock.Unlock()
 		t.logLayout.RemoveItem(t.logFilterInput)
 		t.app.SetFocus(t.tableContainerLog)
 		t.drawContainerLog()
@@ -390,26 +352,18 @@ func (t *Tui) setupSearchCallbacks() {
 // setupModalCallbacks sets up callbacks for modals.
 func (t *Tui) setupModalCallbacks() {
 	t.containerDisappearedModal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-		t.containerDisappearedLock.Lock()
-		t.containerDisappeared = false
-		t.containerDisappearedLock.Unlock()
+		t.setContainerDisappeared(false)
 
 		t.pages.HidePage("modal")
 		t.tableContainer.Clear()
 		t.drawContainers()
 		t.pages.SwitchToPage("containerList")
-		t.currentViewLock.Lock()
-		t.currentView = viewProject
-		t.currentViewLock.Unlock()
+		t.setCurrentView(viewProject)
 		t.currentContainerID = ""
 		t.currentContainerName = ""
 		t.currentContainerService = ""
-		t.logPausedLock.Lock()
-		t.logPaused = false
-		t.logPausedLock.Unlock()
-		t.logFilterLock.Lock()
-		t.logFilter = ""
-		t.logFilterLock.Unlock()
+		t.setLogPaused(false)
+		t.setLogFilter("")
 		t.logFilterInput.SetText("")
 		t.logLayout.RemoveItem(t.logFilterInput)
 		t.tableContainerLogData = nil
@@ -438,4 +392,114 @@ func (t *Tui) findContainerByService(rowIndex int) *dto.Container {
 		}
 	}
 	return nil
+}
+
+// Thread-safe helper methods for state management
+
+func (t *Tui) setCurrentView(view currentView) {
+	t.currentViewLock.Lock()
+	defer t.currentViewLock.Unlock()
+	t.currentView = view
+}
+
+func (t *Tui) getCurrentView() currentView {
+	t.currentViewLock.RLock()
+	defer t.currentViewLock.RUnlock()
+	return t.currentView
+}
+
+func (t *Tui) setLogPaused(paused bool) {
+	t.logPausedLock.Lock()
+	defer t.logPausedLock.Unlock()
+	t.logPaused = paused
+}
+
+func (t *Tui) getLogPaused() bool {
+	t.logPausedLock.RLock()
+	defer t.logPausedLock.RUnlock()
+	return t.logPaused
+}
+
+func (t *Tui) toggleLogPaused() {
+	t.logPausedLock.Lock()
+	defer t.logPausedLock.Unlock()
+	t.logPaused = !t.logPaused
+}
+
+func (t *Tui) setLogFilter(filter string) {
+	t.logFilterLock.Lock()
+	defer t.logFilterLock.Unlock()
+	t.logFilter = filter
+}
+
+func (t *Tui) getLogFilter() string {
+	t.logFilterLock.RLock()
+	defer t.logFilterLock.RUnlock()
+	return t.logFilter
+}
+
+func (t *Tui) toggleLogShowTimestamp() {
+	t.logShowTimestampLock.Lock()
+	defer t.logShowTimestampLock.Unlock()
+	t.logShowTimestamp = !t.logShowTimestamp
+}
+
+func (t *Tui) getLogShowTimestamp() bool {
+	t.logShowTimestampLock.RLock()
+	defer t.logShowTimestampLock.RUnlock()
+	return t.logShowTimestamp
+}
+
+func (t *Tui) setContainerDisappeared(disappeared bool) {
+	t.containerDisappearedLock.Lock()
+	defer t.containerDisappearedLock.Unlock()
+	t.containerDisappeared = disappeared
+}
+
+func (t *Tui) getContainerDisappeared() bool {
+	t.containerDisappearedLock.RLock()
+	defer t.containerDisappearedLock.RUnlock()
+	return t.containerDisappeared
+}
+
+func (t *Tui) setContainerRefreshPaused(paused bool) {
+	t.containerRefreshPausedLock.Lock()
+	defer t.containerRefreshPausedLock.Unlock()
+	t.containerRefreshPaused = paused
+}
+
+func (t *Tui) getContainerRefreshPaused() bool {
+	t.containerRefreshPausedLock.RLock()
+	defer t.containerRefreshPausedLock.RUnlock()
+	return t.containerRefreshPaused
+}
+
+func (t *Tui) stopContainerRefreshTimer() {
+	t.containerRefreshTimerLock.Lock()
+	defer t.containerRefreshTimerLock.Unlock()
+	if t.containerRefreshTimer != nil {
+		t.containerRefreshTimer.Stop()
+		t.containerRefreshTimer = nil
+	}
+}
+
+func (t *Tui) setProjectRefreshPaused(paused bool) {
+	t.projectRefreshPausedLock.Lock()
+	defer t.projectRefreshPausedLock.Unlock()
+	t.projectRefreshPaused = paused
+}
+
+func (t *Tui) getProjectRefreshPaused() bool {
+	t.projectRefreshPausedLock.RLock()
+	defer t.projectRefreshPausedLock.RUnlock()
+	return t.projectRefreshPaused
+}
+
+func (t *Tui) stopProjectRefreshTimer() {
+	t.projectRefreshTimerLock.Lock()
+	defer t.projectRefreshTimerLock.Unlock()
+	if t.projectRefreshTimer != nil {
+		t.projectRefreshTimer.Stop()
+		t.projectRefreshTimer = nil
+	}
 }
