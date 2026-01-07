@@ -73,7 +73,7 @@ func (t *Tui) setupProjectTableHandler() {
 		}
 
 		if r == '/' {
-			t.projectSearchActive = true
+			t.setProjectSearchActive(true)
 			t.projectSearchInput.SetText(t.getProjectSearchQuery())
 			t.projectLayout.AddItem(t.projectSearchInput, 1, 0, true)
 			t.app.SetFocus(t.projectSearchInput)
@@ -117,7 +117,7 @@ func (t *Tui) enterContainerView() {
 		cellText := cell.Text
 		if fuzzyMatch(cellText, project.Name) {
 			t.setCurrentProjectID(string(project.ID))
-			t.currentProjectName = project.Name
+			t.setCurrentProjectName(project.Name)
 			t.setCurrentView(viewProject)
 			break
 		}
@@ -157,7 +157,7 @@ func (t *Tui) setupContainerTableHandler() {
 		}
 
 		if r == '/' {
-			t.containerSearchActive = true
+			t.setContainerSearchActive(true)
 			t.containerSearchInput.SetText(t.getContainerSearchQuery())
 			t.containerLayout.AddItem(t.containerSearchInput, 1, 0, true)
 			t.app.SetFocus(t.containerSearchInput)
@@ -315,7 +315,7 @@ func (t *Tui) setupSearchCallbacks() {
 	})
 
 	t.projectSearchInput.SetDoneFunc(func(key tcell.Key) {
-		t.projectSearchActive = false
+		t.setProjectSearchActive(false)
 		t.projectLayout.RemoveItem(t.projectSearchInput)
 		t.app.SetFocus(t.tableProject)
 		if key == tcell.KeyEsc {
@@ -331,7 +331,7 @@ func (t *Tui) setupSearchCallbacks() {
 	})
 
 	t.containerSearchInput.SetDoneFunc(func(key tcell.Key) {
-		t.containerSearchActive = false
+		t.setContainerSearchActive(false)
 		t.containerLayout.RemoveItem(t.containerSearchInput)
 		t.app.SetFocus(t.tableContainer)
 		if key == tcell.KeyEsc {
@@ -592,7 +592,9 @@ func (t *Tui) getTableContainerLogData() []string {
 func (t *Tui) setTableContainerLogData(data []string) {
 	t.tableContainerLogDataLock.Lock()
 	defer t.tableContainerLogDataLock.Unlock()
-	t.tableContainerLogData = data
+	// Copy data to avoid race conditions if caller modifies original slice
+	t.tableContainerLogData = make([]string, len(data))
+	copy(t.tableContainerLogData, data)
 }
 
 func (t *Tui) clearTableContainerLogData() {
@@ -625,4 +627,60 @@ func (t *Tui) setContainerSearchQuery(query string) {
 	t.containerSearchQueryLock.Lock()
 	defer t.containerSearchQueryLock.Unlock()
 	t.containerSearchQuery = query
+}
+
+// Thread-safe helpers for search active state
+
+func (t *Tui) setProjectSearchActive(active bool) {
+	t.projectSearchActiveLock.Lock()
+	defer t.projectSearchActiveLock.Unlock()
+	t.projectSearchActive = active
+}
+
+func (t *Tui) setContainerSearchActive(active bool) {
+	t.containerSearchActiveLock.Lock()
+	defer t.containerSearchActiveLock.Unlock()
+	t.containerSearchActive = active
+}
+
+// Thread-safe helpers for sort state
+
+func (t *Tui) getProjectSort() (projectSortColumn, bool) {
+	t.projectSortLock.RLock()
+	defer t.projectSortLock.RUnlock()
+	return t.projectSortColumn, t.projectSortAsc
+}
+
+func (t *Tui) setProjectSortState(col projectSortColumn, asc bool) {
+	t.projectSortLock.Lock()
+	defer t.projectSortLock.Unlock()
+	t.projectSortColumn = col
+	t.projectSortAsc = asc
+}
+
+func (t *Tui) getContainerSort() (containerSortColumn, bool) {
+	t.containerSortLock.RLock()
+	defer t.containerSortLock.RUnlock()
+	return t.containerSortColumn, t.containerSortAsc
+}
+
+func (t *Tui) setContainerSortState(col containerSortColumn, asc bool) {
+	t.containerSortLock.Lock()
+	defer t.containerSortLock.Unlock()
+	t.containerSortColumn = col
+	t.containerSortAsc = asc
+}
+
+// Thread-safe helper for currentProjectName (uses currentContainerLock)
+
+func (t *Tui) getCurrentProjectName() string {
+	t.currentContainerLock.RLock()
+	defer t.currentContainerLock.RUnlock()
+	return t.currentProjectName
+}
+
+func (t *Tui) setCurrentProjectName(name string) {
+	t.currentContainerLock.Lock()
+	defer t.currentContainerLock.Unlock()
+	t.currentProjectName = name
 }

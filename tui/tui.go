@@ -25,6 +25,7 @@ type Tui struct {
 	tableProjectDataLock       sync.RWMutex
 	projectSearchInput         *tview.InputField
 	projectSearchActive        bool
+	projectSearchActiveLock    sync.RWMutex
 	projectSearchQuery         string
 	projectSearchQueryLock     sync.RWMutex
 	projectLayout              *tview.Flex
@@ -33,6 +34,7 @@ type Tui struct {
 	tableContainerDataLock     sync.RWMutex
 	containerSearchInput       *tview.InputField
 	containerSearchActive      bool
+	containerSearchActiveLock  sync.RWMutex
 	containerSearchQuery       string
 	containerSearchQueryLock   sync.RWMutex
 	containerLayout            *tview.Flex
@@ -66,9 +68,11 @@ type Tui struct {
 	projectRefreshTimerLock    sync.Mutex
 	projectSortColumn          projectSortColumn
 	projectSortAsc             bool
+	projectSortLock            sync.RWMutex // Protects projectSortColumn and projectSortAsc
 	containerSortColumn        containerSortColumn
 	containerSortAsc           bool
-	currentProjectName         string
+	containerSortLock          sync.RWMutex // Protects containerSortColumn and containerSortAsc
+	currentProjectName         string       // Protected by currentContainerLock
 	currentTableWidth          atomic.Int32
 	containerDisappeared       bool
 	containerDisappearedLock   sync.RWMutex
@@ -239,10 +243,11 @@ func (t *Tui) getSortIndicator(isActive bool, isAsc bool) string {
 }
 
 func (t *Tui) RenderProjectHeader() {
-	nameIndicator := t.getSortIndicator(t.projectSortColumn == projectSortName, t.projectSortAsc)
-	cpuIndicator := t.getSortIndicator(t.projectSortColumn == projectSortCPU, t.projectSortAsc)
-	memIndicator := t.getSortIndicator(t.projectSortColumn == projectSortMemory, t.projectSortAsc)
-	contIndicator := t.getSortIndicator(t.projectSortColumn == projectSortContainers, t.projectSortAsc)
+	sortCol, sortAsc := t.getProjectSort()
+	nameIndicator := t.getSortIndicator(sortCol == projectSortName, sortAsc)
+	cpuIndicator := t.getSortIndicator(sortCol == projectSortCPU, sortAsc)
+	memIndicator := t.getSortIndicator(sortCol == projectSortMemory, sortAsc)
+	contIndicator := t.getSortIndicator(sortCol == projectSortContainers, sortAsc)
 
 	t.tableProject.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("[cyan::b]NAME%s[-::-]", nameIndicator)).SetAlign(tview.AlignLeft).SetExpansion(3).SetSelectable(false))
 	t.tableProject.SetCell(0, 1, tview.NewTableCell(fmt.Sprintf("[cyan::b]CPU%s[-::-]", cpuIndicator)).SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
@@ -252,10 +257,11 @@ func (t *Tui) RenderProjectHeader() {
 }
 
 func (t *Tui) RenderContainerHeader(project string) {
-	nameIndicator := t.getSortIndicator(t.containerSortColumn == containerSortName, t.containerSortAsc)
-	cpuIndicator := t.getSortIndicator(t.containerSortColumn == containerSortCPU, t.containerSortAsc)
-	memIndicator := t.getSortIndicator(t.containerSortColumn == containerSortMemory, t.containerSortAsc)
-	statusIndicator := t.getSortIndicator(t.containerSortColumn == containerSortStatus, t.containerSortAsc)
+	sortCol, sortAsc := t.getContainerSort()
+	nameIndicator := t.getSortIndicator(sortCol == containerSortName, sortAsc)
+	cpuIndicator := t.getSortIndicator(sortCol == containerSortCPU, sortAsc)
+	memIndicator := t.getSortIndicator(sortCol == containerSortMemory, sortAsc)
+	statusIndicator := t.getSortIndicator(sortCol == containerSortStatus, sortAsc)
 
 	// Use stored width from BeforeDrawFunc to get current value
 	w := int(t.currentTableWidth.Load())
@@ -294,8 +300,9 @@ func (t *Tui) drawProjects() {
 	t.tableProjectDataLock.RUnlock()
 
 	projects = filterProjects(projects, t.getProjectSearchQuery())
+	sortCol, sortAsc := t.getProjectSort()
 	slices.SortStableFunc(projects, func(a, b dto.Project) int {
-		return compareProjects(a, b, t.projectSortColumn, t.projectSortAsc)
+		return compareProjects(a, b, sortCol, sortAsc)
 	})
 
 	t.tableProject.Clear()
@@ -358,8 +365,9 @@ func (t *Tui) drawContainers() {
 	currentProjectID := t.getCurrentProjectID()
 
 	// Sort the copied data (no lock needed)
+	sortCol, sortAsc := t.getContainerSort()
 	slices.SortStableFunc(containers, func(a, b dto.Container) int {
-		return compareContainers(a, b, t.containerSortColumn, t.containerSortAsc)
+		return compareContainers(a, b, sortCol, sortAsc)
 	})
 
 	t.tableContainer.Clear()
@@ -528,25 +536,25 @@ func (t *Tui) pauseContainerRefresh() {
 }
 
 func (t *Tui) setProjectSort(col projectSortColumn) {
-	if t.projectSortColumn == col {
+	currentCol, currentAsc := t.getProjectSort()
+	if currentCol == col {
 		// Toggle direction if same column
-		t.projectSortAsc = !t.projectSortAsc
+		t.setProjectSortState(col, !currentAsc)
 	} else {
 		// New column: default to descending for metrics, ascending for name
-		t.projectSortColumn = col
-		t.projectSortAsc = col == projectSortName
+		t.setProjectSortState(col, col == projectSortName)
 	}
 	t.drawProjects()
 }
 
 func (t *Tui) setContainerSort(col containerSortColumn) {
-	if t.containerSortColumn == col {
+	currentCol, currentAsc := t.getContainerSort()
+	if currentCol == col {
 		// Toggle direction if same column
-		t.containerSortAsc = !t.containerSortAsc
+		t.setContainerSortState(col, !currentAsc)
 	} else {
 		// New column: default to descending for metrics, ascending for name and status
-		t.containerSortColumn = col
-		t.containerSortAsc = col == containerSortName || col == containerSortStatus
+		t.setContainerSortState(col, col == containerSortName || col == containerSortStatus)
 	}
 	t.drawContainers()
 }
@@ -584,6 +592,10 @@ func (t *Tui) getData(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Clean up log context when shutting down
+			if ctxCancel != nil {
+				ctxCancel()
+			}
 			return
 
 		case <-ticker.C:
@@ -681,7 +693,7 @@ func (t *Tui) refreshContainerLog(ctx context.Context, ctxCancel context.CancelF
 	}
 
 	currentContainerID := t.getCurrentContainerID()
-	t.logger.InfoContext(ctx, "fetching logs for container", slog.String("container_id", currentContainerID))
+	t.logger.DebugContext(ctx, "fetching logs for container", slog.String("container_id", currentContainerID))
 
 	// First time we enter this view, start the log collection
 	if ctxCancel == nil {

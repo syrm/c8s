@@ -18,7 +18,8 @@ func main() {
 }
 
 func run() error {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	file, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -43,11 +44,19 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize docker client: %w", err)
 	}
+	defer doc.Close()
+
 	go doc.Run(ctx)
 
 	if err := t.Render(ctx); err != nil {
 		return fmt.Errorf("failed to render TUI: %w", err)
 	}
+
+	// Cancel context to signal Docker goroutines to shutdown
+	cancel()
+
+	// Wait for Docker goroutines to finish cleanly
+	doc.Wait()
 
 	logger.InfoContext(ctx, "c8s is over")
 	return nil

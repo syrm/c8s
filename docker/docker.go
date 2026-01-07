@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -33,6 +34,7 @@ type Docker struct {
 	containersCommand chan ContainersCommand
 	requestData       <-chan dto.RequestData
 	logger            *slog.Logger
+	done              chan struct{} // Signals when Run() has completed
 }
 
 func NewDocker(
@@ -53,10 +55,18 @@ func NewDocker(
 		containersCommand: make(chan ContainersCommand),
 		requestData:       requestData,
 		logger:            logger,
+		done:              make(chan struct{}),
 	}, nil
 }
 
+// Close closes the Docker client and releases resources.
+func (d *Docker) Close() error {
+	return d.client.Close()
+}
+
 func (d *Docker) Run(ctx context.Context) {
+	defer close(d.done) // Signal completion when Run exits
+
 	eg, errCtx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
@@ -80,6 +90,11 @@ func (d *Docker) Run(ctx context.Context) {
 	if err := eg.Wait(); err != nil {
 		d.logger.ErrorContext(errCtx, "error in Docker Run", slog.Any("error", err))
 	}
+}
+
+// Wait blocks until Run() has completed.
+func (d *Docker) Wait() {
+	<-d.done
 }
 
 func (d *Docker) handleRequests(ctx context.Context) {
@@ -545,10 +560,12 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 	}
 }
 
-func (d *Docker) handleContainersCommand(ctx context.Context) error {
+func (d *Docker) handleContainersCommand(ctx context.Context) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			d.logger.ErrorContext(ctx, "panic in handleContainersCommand", slog.Any("recover", r))
+			// Convert panic to error to signal critical failure
+			err = fmt.Errorf("panic in handleContainersCommand: %v", r)
 		}
 	}()
 

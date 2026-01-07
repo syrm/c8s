@@ -7,8 +7,7 @@ const (
 	refreshInterval       = 2 * time.Second
 	refreshPauseDuration  = 5 * time.Second
 	statusMessageDuration = 5 * time.Second
-	channelTimeout        = 5 * time.Second  // Timeout for channel operations to prevent deadlock
-	dockerAPITimeout      = 30 * time.Second // Timeout for Docker API calls
+	channelTimeout        = 5 * time.Second // Timeout for channel operations to prevent deadlock
 )
 
 // View type constants

@@ -93,13 +93,20 @@ func (t *Tui) handleContainerShell() bool {
 		return false
 	}
 
+	var shellErr error
 	t.app.Suspend(func() {
 		cmd := exec.Command("docker", "exec", "-it", string(container.ID), "/bin/sh")
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		_ = cmd.Run()
+		shellErr = cmd.Run()
 	})
+
+	if shellErr != nil {
+		t.app.QueueUpdateDraw(func() {
+			t.showStatusMessage(fmt.Sprintf("Shell exited with error: %v", shellErr))
+		})
+	}
 	return true
 }
 
