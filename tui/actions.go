@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/syrm/c8s/dto"
@@ -34,7 +33,7 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 	}
 	cellText := cell.Text
 	for _, container := range t.tableContainerData {
-		if !strings.Contains(cellText, container.Service) {
+		if !fuzzyMatch(cellText, container.Service) {
 			continue
 		}
 

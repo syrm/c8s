@@ -72,7 +72,6 @@ func (t *Tui) setupProjectTableHandler() {
 		}
 
 		if r == '/' {
-			t.setProjectSearchActive(true)
 			t.projectSearchInput.SetText(t.getProjectSearchQuery())
 			t.projectLayout.AddItem(t.projectSearchInput, 1, 0, true)
 			t.app.SetFocus(t.projectSearchInput)
@@ -156,7 +155,6 @@ func (t *Tui) setupContainerTableHandler() {
 		}
 
 		if r == '/' {
-			t.setContainerSearchActive(true)
 			t.containerSearchInput.SetText(t.getContainerSearchQuery())
 			t.containerLayout.AddItem(t.containerSearchInput, 1, 0, true)
 			t.app.SetFocus(t.containerSearchInput)
@@ -314,7 +312,6 @@ func (t *Tui) setupSearchCallbacks() {
 	})
 
 	t.projectSearchInput.SetDoneFunc(func(key tcell.Key) {
-		t.setProjectSearchActive(false)
 		t.projectLayout.RemoveItem(t.projectSearchInput)
 		t.app.SetFocus(t.tableProject)
 		if key == tcell.KeyEsc {
@@ -330,7 +327,6 @@ func (t *Tui) setupSearchCallbacks() {
 	})
 
 	t.containerSearchInput.SetDoneFunc(func(key tcell.Key) {
-		t.setContainerSearchActive(false)
 		t.containerLayout.RemoveItem(t.containerSearchInput)
 		t.app.SetFocus(t.tableContainer)
 		if key == tcell.KeyEsc {
@@ -607,20 +603,6 @@ func (t *Tui) setContainerSearchQuery(query string) {
 	t.containerSearchQueryLock.Lock()
 	defer t.containerSearchQueryLock.Unlock()
 	t.containerSearchQuery = query
-}
-
-// Thread-safe helpers for search active state
-
-func (t *Tui) setProjectSearchActive(active bool) {
-	t.projectSearchActiveLock.Lock()
-	defer t.projectSearchActiveLock.Unlock()
-	t.projectSearchActive = active
-}
-
-func (t *Tui) setContainerSearchActive(active bool) {
-	t.containerSearchActiveLock.Lock()
-	defer t.containerSearchActiveLock.Unlock()
-	t.containerSearchActive = active
 }
 
 // Thread-safe helpers for sort state

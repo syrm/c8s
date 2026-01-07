@@ -24,8 +24,6 @@ type Tui struct {
 	tableProjectData           map[dto.ProjectID]dto.Project
 	tableProjectDataLock       sync.RWMutex
 	projectSearchInput         *tview.InputField
-	projectSearchActive        bool
-	projectSearchActiveLock    sync.RWMutex
 	projectSearchQuery         string
 	projectSearchQueryLock     sync.RWMutex
 	projectLayout              *tview.Flex
@@ -33,8 +31,6 @@ type Tui struct {
 	tableContainerData         map[dto.ContainerID]dto.Container
 	tableContainerDataLock     sync.RWMutex
 	containerSearchInput       *tview.InputField
-	containerSearchActive      bool
-	containerSearchActiveLock  sync.RWMutex
 	containerSearchQuery       string
 	containerSearchQueryLock   sync.RWMutex
 	containerLayout            *tview.Flex
