@@ -322,7 +322,7 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 				}
 
 				// We should copy the data to avoid data race
-				projectID := dto.ProjectID(container.Project.ID)
+				projectID := container.Project.ID
 
 				project, projectExist := projects[projectID]
 
@@ -656,7 +656,11 @@ func (d *Docker) handleEvents(ctx context.Context) {
 
 	for {
 		select {
-		case msg := <-msgs:
+		case msg, ok := <-msgs:
+			if !ok {
+				d.logger.DebugContext(ctx, "events channel closed")
+				return
+			}
 			d.logger.DebugContext(ctx, "event", slog.String("action", string(msg.Action)), slog.String("container_id", msg.Actor.ID))
 
 			response := make(chan *Container)
@@ -734,7 +738,11 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			d.logger.DebugContext(ctx, "handleEvents context is done")
 			return
 
-		case err := <-errs:
+		case err, ok := <-errs:
+			if !ok {
+				d.logger.DebugContext(ctx, "error channel closed")
+				return
+			}
 			if err != nil {
 				d.logger.ErrorContext(ctx, "event", slog.Any("error", err))
 			}
