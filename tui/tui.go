@@ -383,7 +383,7 @@ func (t *Tui) drawContainers() {
 			continue
 		}
 
-		index += 1
+		index++
 
 		// Column 0: Container service name with warning symbol
 		serviceName := container.Service

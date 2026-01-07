@@ -128,7 +128,10 @@ func (c *Container) AppendLog(line string) {
 	c.Logs = append(c.Logs, line)
 	// Limit log size to prevent memory leak
 	if len(c.Logs) > maxLogLines {
-		c.Logs = c.Logs[len(c.Logs)-maxLogLines:]
+		// Copy to new slice to release old elements from underlying array
+		newLogs := make([]string, maxLogLines)
+		copy(newLogs, c.Logs[len(c.Logs)-maxLogLines:])
+		c.Logs = newLogs
 	}
 }
 
