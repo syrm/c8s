@@ -36,6 +36,8 @@ func (t *Tui) updateHeader() {
 		text = t.buildContainerListHeader()
 	case viewContainerLog:
 		text = t.buildLogViewHeader()
+	default:
+		text = " [white::b]c8s[-::]"
 	}
 
 	t.headerView.SetText(text)

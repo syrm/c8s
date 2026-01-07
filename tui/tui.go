@@ -489,7 +489,9 @@ func (t *Tui) drawContainerLog() {
 }
 
 func (t *Tui) showStatusMessage(message string) {
-	t.statusBar.SetText("[red]" + message + "[-]")
+	// Escape brackets to prevent tview from interpreting them as color tags
+	escaped := strings.ReplaceAll(message, "[", "[[]")
+	t.statusBar.SetText("[red]" + escaped + "[-]")
 	t.containerLayout.AddItem(t.statusBar, 1, 0, false)
 
 	// Cancel previous timer if exists
@@ -651,7 +653,7 @@ func (t *Tui) refreshProjectList() {
 	select {
 	case projects := <-response:
 		t.tableProjectDataLock.Lock()
-		t.tableProjectData = make(map[dto.ProjectID]dto.Project)
+		t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))
 		for _, p := range projects {
 			t.tableProjectData[p.ID] = p
 		}
@@ -682,7 +684,7 @@ func (t *Tui) refreshContainerList() {
 	select {
 	case containers := <-response:
 		t.tableContainerDataLock.Lock()
-		t.tableContainerData = make(map[dto.ContainerID]dto.Container)
+		t.tableContainerData = make(map[dto.ContainerID]dto.Container, len(containers))
 		for _, c := range containers {
 			t.tableContainerData[c.ID] = c
 		}

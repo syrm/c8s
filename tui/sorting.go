@@ -87,6 +87,8 @@ func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending b
 		} else if a.ContainersRunning > b.ContainersRunning {
 			cmp = 1
 		}
+	default:
+		cmp = 0
 	}
 
 	if !ascending {
@@ -121,6 +123,8 @@ func compareContainers(a, b dto.Container, sortColumn containerSortColumn, ascen
 		}
 	case containerSortStatus:
 		cmp = strings.Compare(a.Status, b.Status)
+	default:
+		cmp = 0
 	}
 
 	if !ascending {
