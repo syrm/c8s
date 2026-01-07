@@ -2,7 +2,6 @@ package docker
 
 import (
 	"context"
-	"log/slog"
 
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -25,7 +24,6 @@ type Container struct {
 	LogCollectionActive bool
 	Command             chan ContainerCommand
 	cancel              context.CancelFunc
-	logger              *slog.Logger
 }
 
 type ContainerResponse struct {
@@ -49,7 +47,6 @@ func NewContainer(
 	dockerContainer apiContainer.Summary,
 	action events.Action,
 	project dto.ContainerProject,
-	logger *slog.Logger,
 ) *Container {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -77,7 +74,6 @@ func NewContainer(
 		Command: make(chan ContainerCommand),
 		Project: project,
 		cancel:  cancel,
-		logger:  logger,
 		Status:  status,
 	}
 

@@ -106,14 +106,15 @@ func (t *Tui) setupProjectTableHandler() {
 // enterContainerView handles navigation from project list to container list.
 func (t *Tui) enterContainerView() {
 	rowIndex, _ := t.tableProject.GetSelection()
+	cell := t.tableProject.GetCell(rowIndex, 0)
+	if cell == nil {
+		return
+	}
+	cellText := stripWarningPrefix(cell.Text)
+
 	t.tableProjectDataLock.RLock()
 	for _, project := range t.tableProjectData {
-		cell := t.tableProject.GetCell(rowIndex, 0)
-		if cell == nil {
-			continue
-		}
-		cellText := cell.Text
-		if fuzzyMatch(cellText, project.Name) {
+		if cellText == project.Name {
 			t.setCurrentProjectID(string(project.ID))
 			t.setCurrentProjectName(project.Name)
 			t.setCurrentView(viewProject)
@@ -225,14 +226,15 @@ func (t *Tui) exitContainerView() {
 // enterLogView handles navigation from container list to log view.
 func (t *Tui) enterLogView() {
 	rowIndex, _ := t.tableContainer.GetSelection()
+	cell := t.tableContainer.GetCell(rowIndex, 0)
+	if cell == nil {
+		return
+	}
+	cellText := stripWarningPrefix(cell.Text)
+
 	t.tableContainerDataLock.RLock()
 	for _, container := range t.tableContainerData {
-		cell := t.tableContainer.GetCell(rowIndex, 0)
-		if cell == nil {
-			continue
-		}
-		cellText := cell.Text
-		if fuzzyMatch(cellText, container.Service) {
+		if cellText == container.Service {
 			t.setCurrentContainerInfo(string(container.ID), container.Name, container.Service)
 			break
 		}

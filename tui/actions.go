@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/syrm/c8s/dto"
@@ -24,16 +25,17 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 		return nil
 	}
 
-	t.tableContainerDataLock.RLock()
-	defer t.tableContainerDataLock.RUnlock()
-
 	cell := t.tableContainer.GetCell(rowIndex, 0)
 	if cell == nil {
 		return nil
 	}
-	cellText := cell.Text
+	cellText := stripWarningPrefix(cell.Text)
+
+	t.tableContainerDataLock.RLock()
+	defer t.tableContainerDataLock.RUnlock()
+
 	for _, container := range t.tableContainerData {
-		if !fuzzyMatch(cellText, container.Service) {
+		if cellText != container.Service {
 			continue
 		}
 
@@ -159,8 +161,9 @@ func (t *Tui) handleContainerRestart() bool {
 			cmd = exec.Command("docker", "start", string(container.ID))
 		}
 		if err := cmd.Run(); err != nil {
+			verb := strings.TrimSuffix(action, "ing")
 			t.app.QueueUpdateDraw(func() {
-				t.showStatusMessage(fmt.Sprintf("Failed to %s container: %v", action[:len(action)-3], err))
+				t.showStatusMessage(fmt.Sprintf("Failed to %s container: %v", verb, err))
 			})
 		}
 	}()

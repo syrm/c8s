@@ -6,6 +6,17 @@ import (
 	"github.com/syrm/c8s/dto"
 )
 
+// warningPrefix is the tview formatting prefix added to items with high CPU/memory usage.
+const warningPrefix = "[yellow]⚠[-] "
+
+// stripWarningPrefix removes the warning prefix from cell text if present.
+func stripWarningPrefix(text string) string {
+	if strings.HasPrefix(text, warningPrefix) {
+		return text[len(warningPrefix):]
+	}
+	return text
+}
+
 // fuzzyMatch checks if all characters in query appear in order in text.
 // Example: "cr" matches "container" because 'c' and 'r' appear in order.
 func fuzzyMatch(text, query string) bool {

@@ -1,14 +1,20 @@
 package tui
 
-import "time"
+import (
+	"time"
+
+	"github.com/syrm/c8s/dto"
+)
 
 // Timing constants
 const (
 	refreshInterval       = 2 * time.Second
 	refreshPauseDuration  = 5 * time.Second
 	statusMessageDuration = 5 * time.Second
-	channelTimeout        = 5 * time.Second // Timeout for channel operations to prevent deadlock
 )
+
+// channelTimeout is imported from dto for consistent timeout across layers.
+const channelTimeout = dto.ChannelTimeout
 
 // View type constants
 type currentView int
