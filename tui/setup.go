@@ -1,32 +1,39 @@
 package tui
 
 import (
+	"sync"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
+// setupStylesOnce ensures styles are only configured once.
+var setupStylesOnce sync.Once
+
 // setupStyles configures tview global styles (k9s-like appearance).
 func setupStyles() {
-	// K9s-style borders
-	tview.Borders.HorizontalFocus = tview.BoxDrawingsLightHorizontal
-	tview.Borders.VerticalFocus = tview.BoxDrawingsLightVertical
-	tview.Borders.TopLeftFocus = tview.BoxDrawingsLightDownAndRight
-	tview.Borders.TopRightFocus = tview.BoxDrawingsLightDownAndLeft
-	tview.Borders.BottomLeftFocus = tview.BoxDrawingsLightUpAndRight
-	tview.Borders.BottomRightFocus = tview.BoxDrawingsLightUpAndLeft
+	setupStylesOnce.Do(func() {
+		// K9s-style borders
+		tview.Borders.HorizontalFocus = tview.BoxDrawingsLightHorizontal
+		tview.Borders.VerticalFocus = tview.BoxDrawingsLightVertical
+		tview.Borders.TopLeftFocus = tview.BoxDrawingsLightDownAndRight
+		tview.Borders.TopRightFocus = tview.BoxDrawingsLightDownAndLeft
+		tview.Borders.BottomLeftFocus = tview.BoxDrawingsLightUpAndRight
+		tview.Borders.BottomRightFocus = tview.BoxDrawingsLightUpAndLeft
 
-	// K9s color scheme
-	tview.Styles.PrimitiveBackgroundColor = tcell.ColorBlack
-	tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
-	tview.Styles.MoreContrastBackgroundColor = tcell.ColorBlack
-	tview.Styles.BorderColor = tcell.ColorDarkCyan
-	tview.Styles.TitleColor = tcell.GetColor("cyan")
-	tview.Styles.GraphicsColor = tcell.GetColor("cyan")
-	tview.Styles.PrimaryTextColor = tcell.ColorWhite
-	tview.Styles.SecondaryTextColor = tcell.ColorLightGray
-	tview.Styles.TertiaryTextColor = tcell.ColorGray
-	tview.Styles.InverseTextColor = tcell.ColorBlack
-	tview.Styles.ContrastSecondaryTextColor = tcell.ColorDarkCyan
+		// K9s color scheme
+		tview.Styles.PrimitiveBackgroundColor = tcell.ColorBlack
+		tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
+		tview.Styles.MoreContrastBackgroundColor = tcell.ColorBlack
+		tview.Styles.BorderColor = tcell.ColorDarkCyan
+		tview.Styles.TitleColor = tcell.GetColor("cyan")
+		tview.Styles.GraphicsColor = tcell.GetColor("cyan")
+		tview.Styles.PrimaryTextColor = tcell.ColorWhite
+		tview.Styles.SecondaryTextColor = tcell.ColorLightGray
+		tview.Styles.TertiaryTextColor = tcell.ColorGray
+		tview.Styles.InverseTextColor = tcell.ColorBlack
+		tview.Styles.ContrastSecondaryTextColor = tcell.ColorDarkCyan
+	})
 }
 
 // createSearchInput creates a styled search input field.

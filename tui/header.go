@@ -1,6 +1,10 @@
 package tui
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/syrm/c8s/dto"
+)
 
 // getProjectName returns the name of the current project, or "unknown" if not found.
 func (t *Tui) getProjectName() string {
@@ -12,10 +16,8 @@ func (t *Tui) getProjectName() string {
 	t.tableProjectDataLock.RLock()
 	defer t.tableProjectDataLock.RUnlock()
 
-	for _, project := range t.tableProjectData {
-		if string(project.ID) == currentProjectID {
-			return project.Name
-		}
+	if project, ok := t.tableProjectData[dto.ProjectID(currentProjectID)]; ok {
+		return project.Name
 	}
 	return "unknown"
 }

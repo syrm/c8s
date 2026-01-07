@@ -532,6 +532,13 @@ func (t *Tui) pauseContainerRefresh() {
 
 	// Resume refresh after duration
 	t.containerRefreshTimer = time.AfterFunc(refreshPauseDuration, func() {
+		t.closingLock.RLock()
+		if t.closing {
+			t.closingLock.RUnlock()
+			return
+		}
+		t.closingLock.RUnlock()
+
 		t.containerRefreshPausedLock.Lock()
 		t.containerRefreshPaused = false
 		t.containerRefreshPausedLock.Unlock()
@@ -576,6 +583,13 @@ func (t *Tui) pauseProjectRefresh() {
 
 	// Resume refresh after duration
 	t.projectRefreshTimer = time.AfterFunc(refreshPauseDuration, func() {
+		t.closingLock.RLock()
+		if t.closing {
+			t.closingLock.RUnlock()
+			return
+		}
+		t.closingLock.RUnlock()
+
 		t.projectRefreshPausedLock.Lock()
 		t.projectRefreshPaused = false
 		t.projectRefreshPausedLock.Unlock()
