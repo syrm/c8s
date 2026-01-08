@@ -318,9 +318,11 @@ func (t *Tui) exitLogView() {
 	// Stop log collection for the current container
 	currentContainerID := t.getCurrentContainerID()
 	if currentContainerID != "" {
+		timer := time.NewTimer(channelTimeout)
 		select {
 		case t.requestData <- &dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)}:
-		case <-time.After(channelTimeout):
+			timer.Stop()
+		case <-timer.C:
 			// Timeout is acceptable here, we're exiting anyway
 		}
 	}
@@ -428,21 +430,15 @@ func (t *Tui) getCurrentView() currentView {
 }
 
 func (t *Tui) setLogPaused(paused bool) {
-	t.logPausedLock.Lock()
-	defer t.logPausedLock.Unlock()
-	t.logPaused = paused
+	t.logPaused.Store(paused)
 }
 
 func (t *Tui) getLogPaused() bool {
-	t.logPausedLock.RLock()
-	defer t.logPausedLock.RUnlock()
-	return t.logPaused
+	return t.logPaused.Load()
 }
 
 func (t *Tui) toggleLogPaused() {
-	t.logPausedLock.Lock()
-	defer t.logPausedLock.Unlock()
-	t.logPaused = !t.logPaused
+	t.logPaused.Store(!t.logPaused.Load())
 }
 
 func (t *Tui) setLogFilter(filter string) {
@@ -458,39 +454,27 @@ func (t *Tui) getLogFilter() string {
 }
 
 func (t *Tui) toggleLogShowTimestamp() {
-	t.logShowTimestampLock.Lock()
-	defer t.logShowTimestampLock.Unlock()
-	t.logShowTimestamp = !t.logShowTimestamp
+	t.logShowTimestamp.Store(!t.logShowTimestamp.Load())
 }
 
 func (t *Tui) getLogShowTimestamp() bool {
-	t.logShowTimestampLock.RLock()
-	defer t.logShowTimestampLock.RUnlock()
-	return t.logShowTimestamp
+	return t.logShowTimestamp.Load()
 }
 
 func (t *Tui) setContainerDisappeared(disappeared bool) {
-	t.containerDisappearedLock.Lock()
-	defer t.containerDisappearedLock.Unlock()
-	t.containerDisappeared = disappeared
+	t.containerDisappeared.Store(disappeared)
 }
 
 func (t *Tui) getContainerDisappeared() bool {
-	t.containerDisappearedLock.RLock()
-	defer t.containerDisappearedLock.RUnlock()
-	return t.containerDisappeared
+	return t.containerDisappeared.Load()
 }
 
 func (t *Tui) setContainerRefreshPaused(paused bool) {
-	t.containerRefreshPausedLock.Lock()
-	defer t.containerRefreshPausedLock.Unlock()
-	t.containerRefreshPaused = paused
+	t.containerRefreshPaused.Store(paused)
 }
 
 func (t *Tui) getContainerRefreshPaused() bool {
-	t.containerRefreshPausedLock.RLock()
-	defer t.containerRefreshPausedLock.RUnlock()
-	return t.containerRefreshPaused
+	return t.containerRefreshPaused.Load()
 }
 
 func (t *Tui) stopContainerRefreshTimer() {
@@ -503,15 +487,11 @@ func (t *Tui) stopContainerRefreshTimer() {
 }
 
 func (t *Tui) setProjectRefreshPaused(paused bool) {
-	t.projectRefreshPausedLock.Lock()
-	defer t.projectRefreshPausedLock.Unlock()
-	t.projectRefreshPaused = paused
+	t.projectRefreshPaused.Store(paused)
 }
 
 func (t *Tui) getProjectRefreshPaused() bool {
-	t.projectRefreshPausedLock.RLock()
-	defer t.projectRefreshPausedLock.RUnlock()
-	return t.projectRefreshPaused
+	return t.projectRefreshPaused.Load()
 }
 
 func (t *Tui) stopProjectRefreshTimer() {

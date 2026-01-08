@@ -38,10 +38,8 @@ type Tui struct {
 	tableContainerLog          *tview.TextView
 	tableContainerLogData      []string
 	tableContainerLogDataLock  sync.RWMutex
-	logPaused                  bool
-	logPausedLock              sync.RWMutex
-	logShowTimestamp           bool
-	logShowTimestampLock       sync.RWMutex
+	logPaused                  atomic.Bool
+	logShowTimestamp           atomic.Bool
 	logFilter                  string
 	logFilterLock              sync.RWMutex
 	statusTimer                *time.Timer
@@ -55,12 +53,10 @@ type Tui struct {
 	currentContainerName       string
 	currentContainerService    string
 	currentContainerLock       sync.RWMutex // Protects currentProjectID, currentContainerID, currentContainerName, currentContainerService
-	containerRefreshPaused     bool
-	containerRefreshPausedLock sync.RWMutex
+	containerRefreshPaused     atomic.Bool
 	containerRefreshTimer      *time.Timer
 	containerRefreshTimerLock  sync.Mutex
-	projectRefreshPaused       bool
-	projectRefreshPausedLock   sync.RWMutex
+	projectRefreshPaused       atomic.Bool
 	projectRefreshTimer        *time.Timer
 	projectRefreshTimerLock    sync.Mutex
 	projectSortColumn          projectSortColumn
@@ -71,16 +67,14 @@ type Tui struct {
 	containerSortLock          sync.RWMutex // Protects containerSortColumn and containerSortAsc
 	currentProjectName         string       // Protected by currentContainerLock
 	currentTableWidth          atomic.Int32
-	containerDisappeared       bool
-	containerDisappearedLock   sync.RWMutex
+	containerDisappeared       atomic.Bool
 	containerDisappearedModal  *tview.Modal
 	helpModal                  *tview.Grid
 	helpTextView               *tview.TextView
 	headerView                 *tview.TextView
 	requestData                chan dto.RequestData
 	logger                     *slog.Logger
-	closing                    bool
-	closingLock                sync.RWMutex
+	closing                    atomic.Bool
 }
 
 func NewTui(logger *slog.Logger) *Tui {
@@ -506,10 +500,7 @@ func (t *Tui) showStatusMessage(message string) {
 	// Clear message after duration
 	t.statusTimer = time.AfterFunc(statusMessageDuration, func() {
 		// Check if TUI is closing to avoid race with cleanup
-		t.closingLock.RLock()
-		isClosing := t.closing
-		t.closingLock.RUnlock()
-		if isClosing {
+		if t.closing.Load() {
 			return
 		}
 
@@ -521,9 +512,7 @@ func (t *Tui) showStatusMessage(message string) {
 }
 
 func (t *Tui) pauseContainerRefresh() {
-	t.containerRefreshPausedLock.Lock()
-	t.containerRefreshPaused = true
-	t.containerRefreshPausedLock.Unlock()
+	t.containerRefreshPaused.Store(true)
 
 	t.containerRefreshTimerLock.Lock()
 	// Cancel previous timer if exists
@@ -533,16 +522,9 @@ func (t *Tui) pauseContainerRefresh() {
 
 	// Resume refresh after duration
 	t.containerRefreshTimer = time.AfterFunc(refreshPauseDuration, func() {
-		t.closingLock.RLock()
-		if t.closing {
-			t.closingLock.RUnlock()
-			return
+		if !t.closing.Load() {
+			t.containerRefreshPaused.Store(false)
 		}
-		t.closingLock.RUnlock()
-
-		t.containerRefreshPausedLock.Lock()
-		t.containerRefreshPaused = false
-		t.containerRefreshPausedLock.Unlock()
 	})
 	t.containerRefreshTimerLock.Unlock()
 }
@@ -572,9 +554,7 @@ func (t *Tui) setContainerSort(col containerSortColumn) {
 }
 
 func (t *Tui) pauseProjectRefresh() {
-	t.projectRefreshPausedLock.Lock()
-	t.projectRefreshPaused = true
-	t.projectRefreshPausedLock.Unlock()
+	t.projectRefreshPaused.Store(true)
 
 	t.projectRefreshTimerLock.Lock()
 	// Cancel previous timer if exists
@@ -584,16 +564,9 @@ func (t *Tui) pauseProjectRefresh() {
 
 	// Resume refresh after duration
 	t.projectRefreshTimer = time.AfterFunc(refreshPauseDuration, func() {
-		t.closingLock.RLock()
-		if t.closing {
-			t.closingLock.RUnlock()
-			return
+		if !t.closing.Load() {
+			t.projectRefreshPaused.Store(false)
 		}
-		t.closingLock.RUnlock()
-
-		t.projectRefreshPausedLock.Lock()
-		t.projectRefreshPaused = false
-		t.projectRefreshPausedLock.Unlock()
 	})
 	t.projectRefreshTimerLock.Unlock()
 }
@@ -633,9 +606,12 @@ func (t *Tui) refreshProjectList() {
 	}
 
 	response := make(chan []dto.Project, 1)
+	timer := time.NewTimer(channelTimeout)
+	defer timer.Stop()
+
 	select {
 	case t.requestData <- &dto.RequestProjectList{Response: response}:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout sending project list request")
 		return
 	}
@@ -652,7 +628,7 @@ func (t *Tui) refreshProjectList() {
 		t.app.QueueUpdateDraw(func() {
 			t.drawProjects()
 		})
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout waiting for project list response")
 	}
 }
@@ -664,9 +640,12 @@ func (t *Tui) refreshContainerList() {
 
 	currentProjectID := t.getCurrentProjectID()
 	response := make(chan []dto.Container, 1)
+	timer := time.NewTimer(channelTimeout)
+	defer timer.Stop()
+
 	select {
 	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: response}:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout sending container list request")
 		return
 	}
@@ -674,16 +653,25 @@ func (t *Tui) refreshContainerList() {
 	select {
 	case containers := <-response:
 		t.tableContainerDataLock.Lock()
-		t.tableContainerData = make(map[dto.ContainerID]dto.Container, len(containers))
+		// Update map in place instead of recreating it to reduce GC pressure
+		// Build a set of active container IDs
+		activeContainers := make(map[dto.ContainerID]struct{}, len(containers))
 		for _, c := range containers {
 			t.tableContainerData[c.ID] = c
+			activeContainers[c.ID] = struct{}{}
+		}
+		// Remove containers that are no longer present
+		for id := range t.tableContainerData {
+			if _, exists := activeContainers[id]; !exists {
+				delete(t.tableContainerData, id)
+			}
 		}
 		t.tableContainerDataLock.Unlock()
 
 		t.app.QueueUpdateDraw(func() {
 			t.drawContainers()
 		})
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout waiting for container list response")
 	}
 }
@@ -710,9 +698,12 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context) {
 
 	// Log collection is running, check if we have logs now
 	response := make(chan dto.Container, 1)
+	timer := time.NewTimer(channelTimeout)
+	defer timer.Stop()
+
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout sending container log request in handleDisappearedContainer")
 		return
 	}
@@ -720,7 +711,7 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context) {
 	var c dto.Container
 	select {
 	case c = <-response:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout waiting for container log response in handleDisappearedContainer")
 		return
 	}
@@ -758,9 +749,12 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 		slog.String("project", currentProjectID))
 
 	responseProject := make(chan []dto.Container, 1)
+	timer1 := time.NewTimer(channelTimeout)
+	defer timer1.Stop()
+
 	select {
 	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: responseProject}:
-	case <-time.After(channelTimeout):
+	case <-timer1.C:
 		t.logger.Warn("timeout sending project request in tryReconnectContainer")
 		return
 	}
@@ -768,7 +762,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 	var containers []dto.Container
 	select {
 	case containers = <-responseProject:
-	case <-time.After(channelTimeout):
+	case <-timer1.C:
 		t.logger.Warn("timeout waiting for project response in tryReconnectContainer")
 		return
 	}
@@ -798,9 +792,12 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 	// Start log collection for the new container
 	response := make(chan dto.Container, 1)
 	newContainerID := t.getCurrentContainerID()
+	timer2 := time.NewTimer(channelTimeout)
+	defer timer2.Stop()
+
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(newContainerID), Response: response}:
-	case <-time.After(channelTimeout):
+	case <-timer2.C:
 		t.logger.Warn("timeout sending container log request in tryReconnectContainer")
 		return
 	}
@@ -808,7 +805,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 	var c dto.Container
 	select {
 	case c = <-response:
-	case <-time.After(channelTimeout):
+	case <-timer2.C:
 		t.logger.Warn("timeout waiting for container log response in tryReconnectContainer")
 		return
 	}
@@ -826,9 +823,12 @@ func (t *Tui) startLogCollection(ctx context.Context) {
 	currentContainerName := t.getCurrentContainerName()
 
 	response := make(chan dto.Container, 1)
+	timer := time.NewTimer(channelTimeout)
+	defer timer.Stop()
+
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout sending container log request in startLogCollection")
 		return
 	}
@@ -836,7 +836,7 @@ func (t *Tui) startLogCollection(ctx context.Context) {
 	var c dto.Container
 	select {
 	case c = <-response:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout waiting for container log response in startLogCollection")
 		return
 	}
@@ -864,9 +864,12 @@ func (t *Tui) updateLogs(ctx context.Context) {
 	currentContainerName := t.getCurrentContainerName()
 
 	response := make(chan dto.Container, 1)
+	timer := time.NewTimer(channelTimeout)
+	defer timer.Stop()
+
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout sending container log request in updateLogs")
 		return
 	}
@@ -874,7 +877,7 @@ func (t *Tui) updateLogs(ctx context.Context) {
 	var c dto.Container
 	select {
 	case c = <-response:
-	case <-time.After(channelTimeout):
+	case <-timer.C:
 		t.logger.Warn("timeout waiting for container log response in updateLogs")
 		return
 	}
@@ -922,9 +925,7 @@ func (t *Tui) Render(ctx context.Context) error {
 // cleanup releases resources when the TUI exits
 func (t *Tui) cleanup() {
 	// Set closing flag to prevent timer callbacks from running
-	t.closingLock.Lock()
-	t.closing = true
-	t.closingLock.Unlock()
+	t.closing.Store(true)
 
 	// Stop all timers - protected by mutex
 	t.statusTimerLock.Lock()

@@ -55,12 +55,10 @@ func (t *Tui) buildProjectListHeader() string {
 		filter = fmt.Sprintf(" [white](filter: %s)[-]", projectSearchQuery)
 	}
 
-	t.projectRefreshPausedLock.RLock()
 	paused := ""
-	if t.projectRefreshPaused {
+	if t.getProjectRefreshPaused() {
 		paused = " [fuchsia]PAUSED[-]"
 	}
-	t.projectRefreshPausedLock.RUnlock()
 
 	return fmt.Sprintf(" [white::b]c8s[-::] [white]|[-] [white]Projects([fuchsia]%d[-])[-]%s%s", count, filter, paused)
 }
@@ -79,12 +77,10 @@ func (t *Tui) buildContainerListHeader() string {
 		filter = fmt.Sprintf(" [white](filter: %s)[-]", containerSearchQuery)
 	}
 
-	t.containerRefreshPausedLock.RLock()
 	paused := ""
-	if t.containerRefreshPaused {
+	if t.getContainerRefreshPaused() {
 		paused = " [fuchsia]PAUSED[-]"
 	}
-	t.containerRefreshPausedLock.RUnlock()
 
 	return fmt.Sprintf(" [white::b]c8s[-::] [white]|[-] [white]Containers([fuchsia]%d[-])[-] [white](%s)[-]%s%s",
 		count, projectName, filter, paused)
@@ -94,11 +90,9 @@ func (t *Tui) buildContainerListHeader() string {
 func (t *Tui) buildLogViewHeader() string {
 	status := ""
 
-	t.logPausedLock.RLock()
-	if t.logPaused {
+	if t.getLogPaused() {
 		status += " [fuchsia]PAUSED[-]"
 	}
-	t.logPausedLock.RUnlock()
 
 	t.logFilterLock.RLock()
 	if t.logFilter != "" {
@@ -106,11 +100,9 @@ func (t *Tui) buildLogViewHeader() string {
 	}
 	t.logFilterLock.RUnlock()
 
-	t.logShowTimestampLock.RLock()
-	if t.logShowTimestamp {
+	if t.getLogShowTimestamp() {
 		status += " [white](time)[-]"
 	}
-	t.logShowTimestampLock.RUnlock()
 
 	projectName := t.getProjectName()
 	containerService := t.getCurrentContainerService()
