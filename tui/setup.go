@@ -115,9 +115,13 @@ func (t *Tui) setupProjectTableHandler() {
 
 // enterContainerView handles navigation from project list to container list.
 func (t *Tui) enterContainerView() {
-	rowIndex, _ := t.tableProject.GetSelection()
+	rowIndex, rowCount := t.tableProject.GetSelection()
+	// Validate row index: must be > 0 (skip header) and < rowCount
+	if rowIndex <= 0 || rowIndex >= rowCount {
+		return
+	}
 	cell := t.tableProject.GetCell(rowIndex, 0)
-	if cell == nil {
+	if cell == nil || cell.Text == "" {
 		return
 	}
 	cellText := stripWarningPrefix(cell.Text)
@@ -241,9 +245,13 @@ func (t *Tui) exitContainerView() {
 
 // enterLogView handles navigation from container list to log view.
 func (t *Tui) enterLogView() {
-	rowIndex, _ := t.tableContainer.GetSelection()
+	rowIndex, rowCount := t.tableContainer.GetSelection()
+	// Validate row index: must be > 0 (skip header) and < rowCount
+	if rowIndex <= 0 || rowIndex >= rowCount {
+		return
+	}
 	cell := t.tableContainer.GetCell(rowIndex, 0)
-	if cell == nil {
+	if cell == nil || cell.Text == "" {
 		return
 	}
 	cellText := stripWarningPrefix(cell.Text)

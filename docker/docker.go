@@ -332,8 +332,6 @@ func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.Reque
 	timer2 := time.NewTimer(dto.ChannelTimeout)
 	defer timer1.Stop()
 	defer timer2.Stop()
-	timer1.Stop()
-	timer2.Stop()
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -344,7 +342,6 @@ func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.Reque
 				return nil
 			}
 
-			timer2.Reset(dto.ChannelTimeout)
 			select {
 			case c.Command <- ContainerCommand{
 				functor: func(container *Container) {
@@ -369,7 +366,6 @@ func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.Reque
 func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestProjectList) {
 	timer1 := time.NewTimer(dto.ChannelTimeout)
 	defer timer1.Stop()
-	timer1.Stop()
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -380,20 +376,18 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 				response := make(chan ContainerResponse, 1) // Buffered!
 				timer2 := time.NewTimer(dto.ChannelTimeout)
 				timer3 := time.NewTimer(dto.ChannelTimeout)
-				timer2.Stop()
-				timer3.Stop()
+				defer timer2.Stop()
+				defer timer3.Stop()
+
 				select {
 				case c.Command <- ContainerCommand{
 					response: response,
 				}:
 				case <-timer2.C:
 					// Skip this container if timeout
-					timer2.Stop()
-					timer3.Stop()
 					continue
 				}
 
-				timer3.Reset(dto.ChannelTimeout)
 				var container ContainerResponse
 				select {
 				case container = <-response:
@@ -661,9 +655,6 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	defer timer1.Stop()
 	defer timer2.Stop()
 	defer timer3.Stop()
-	timer1.Stop()
-	timer2.Stop()
-	timer3.Stop()
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -680,7 +671,6 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	}
 
 	var c *Container
-	timer2.Reset(dto.ChannelTimeout)
 	select {
 	case c = <-response:
 	case <-timer2.C:
@@ -697,7 +687,6 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 
 	c = NewContainer(ctx, dockerContainer, action, project)
 
-	timer3.Reset(dto.ChannelTimeout)
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
@@ -730,7 +719,6 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		// Mark container as exited instead of deleting
 		timer1 := time.NewTimer(dto.ChannelTimeout)
 		defer timer1.Stop()
-		timer1.Stop()
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
@@ -750,7 +738,6 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		// Mark container as exited when stats streaming ends
 		timer2 := time.NewTimer(dto.ChannelTimeout)
 		defer timer2.Stop()
-		timer2.Stop()
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
@@ -780,8 +767,6 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 
 		s := stats
 		timer3 := time.NewTimer(dto.ChannelTimeout)
-		timer3.Stop()
-		timer3.Reset(dto.ChannelTimeout)
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
@@ -843,8 +828,6 @@ func (d *Docker) handleEvents(ctx context.Context) {
 
 			response := make(chan *Container, 1)
 			timer1 := time.NewTimer(dto.ChannelTimeout)
-			timer1.Stop()
-			timer1.Reset(dto.ChannelTimeout)
 			select {
 			case d.containersCommand <- ContainersCommand{
 				functor: func(docker *Docker) *Container {
@@ -864,8 +847,6 @@ func (d *Docker) handleEvents(ctx context.Context) {
 
 			var c *Container
 			timer2 := time.NewTimer(dto.ChannelTimeout)
-			timer2.Stop()
-			timer2.Reset(dto.ChannelTimeout)
 			select {
 			case c = <-response:
 			case <-timer2.C:
@@ -880,8 +861,6 @@ func (d *Docker) handleEvents(ctx context.Context) {
 
 			if c != nil {
 				timer3 := time.NewTimer(dto.ChannelTimeout)
-				timer3.Stop()
-				timer3.Reset(dto.ChannelTimeout)
 				select {
 				case c.Command <- ContainerCommand{
 					functor: func(container *Container) {
@@ -914,8 +893,6 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					d.logContextsLock.Unlock()
 
 					timer4 := time.NewTimer(dto.ChannelTimeout)
-					timer4.Stop()
-					timer4.Reset(dto.ChannelTimeout)
 					select {
 					case d.containersCommand <- ContainersCommand{
 						functor: func(docker *Docker) *Container {

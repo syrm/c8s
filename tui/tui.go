@@ -75,6 +75,11 @@ type Tui struct {
 	requestData                chan dto.RequestData
 	logger                     *slog.Logger
 	closing                    atomic.Bool
+	// actionsContext tracks goroutines for container actions (stop, restart, remove)
+	actionsCtx        context.Context
+	actionsCancel     context.CancelFunc
+	actionsCancelLock sync.Mutex
+	actionsWG         sync.WaitGroup
 }
 
 func NewTui(logger *slog.Logger) *Tui {
@@ -195,6 +200,9 @@ func NewTui(logger *slog.Logger) *Tui {
 		projectSortColumn:  projectSortCPU,
 		containerSortColumn: containerSortCPU,
 	}
+
+	// Initialize actions context for container action goroutines
+	tui.actionsCtx, tui.actionsCancel = context.WithCancel(context.Background())
 
 	// Add pages
 	pages.AddPage("projectList", projectLayout, true, true)
@@ -926,6 +934,17 @@ func (t *Tui) Render(ctx context.Context) error {
 func (t *Tui) cleanup() {
 	// Set closing flag to prevent timer callbacks from running
 	t.closing.Store(true)
+
+	// Cancel any pending action goroutines and wait for them to finish
+	t.actionsCancelLock.Lock()
+	if t.actionsCancel != nil {
+		t.actionsCancel()
+		t.actionsCancel = nil
+	}
+	t.actionsCancelLock.Unlock()
+
+	// Wait for all action goroutines to complete
+	t.actionsWG.Wait()
 
 	// Stop all timers - protected by mutex
 	t.statusTimerLock.Lock()

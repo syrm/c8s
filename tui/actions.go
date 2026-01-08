@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -86,7 +87,7 @@ func (t *Tui) updateLocalCache(containerID dto.ContainerID, action string) {
 	defer t.tableContainerDataLock.Unlock()
 
 	if c, ok := t.tableContainerData[containerID]; ok {
-		// Create a new container struct with the updated pending action
+		// Create a copy with the updated pending action
 		// This is necessary because dto.Container is a value type in the map
 		c.PendingAction = action
 		t.tableContainerData[containerID] = c
@@ -130,12 +131,26 @@ func (t *Tui) handleContainerStop() bool {
 	t.updateLocalCache(container.ID, actionStopping)
 	t.drawContainers()
 
+	// Track the action goroutine for proper cleanup
+	t.actionsWG.Add(1)
 	go func() {
-		cmd := exec.Command("docker", "stop", string(container.ID))
+		defer t.actionsWG.Done()
+
+		// Use the shared actions context with timeout to prevent hanging
+		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "docker", "stop", string(container.ID))
 		if err := cmd.Run(); err != nil {
-			t.app.QueueUpdateDraw(func() {
-				t.showStatusMessage(fmt.Sprintf("Failed to stop container: %v", err))
-			})
+			if ctx.Err() == context.DeadlineExceeded {
+				t.app.QueueUpdateDraw(func() {
+					t.showStatusMessage("Stop container timed out")
+				})
+			} else {
+				t.app.QueueUpdateDraw(func() {
+					t.showStatusMessage(fmt.Sprintf("Failed to stop container: %v", err))
+				})
+			}
 		}
 	}()
 	return true
@@ -160,18 +175,32 @@ func (t *Tui) handleContainerRestart() bool {
 	t.updateLocalCache(container.ID, action)
 	t.drawContainers()
 
+	// Track the action goroutine for proper cleanup
+	t.actionsWG.Add(1)
 	go func() {
+		defer t.actionsWG.Done()
+
+		// Use the shared actions context with timeout to prevent hanging
+		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
+		defer cancel()
+
 		var cmd *exec.Cmd
 		if container.Status == dto.StatusRunning {
-			cmd = exec.Command("docker", "restart", string(container.ID))
+			cmd = exec.CommandContext(ctx, "docker", "restart", string(container.ID))
 		} else {
-			cmd = exec.Command("docker", "start", string(container.ID))
+			cmd = exec.CommandContext(ctx, "docker", "start", string(container.ID))
 		}
 		if err := cmd.Run(); err != nil {
-			verb := strings.TrimSuffix(action, "ing")
-			t.app.QueueUpdateDraw(func() {
-				t.showStatusMessage(fmt.Sprintf("Failed to %s container: %v", verb, err))
-			})
+			if ctx.Err() == context.DeadlineExceeded {
+				t.app.QueueUpdateDraw(func() {
+					t.showStatusMessage("Restart container timed out")
+				})
+			} else {
+				verb := strings.TrimSuffix(action, "ing")
+				t.app.QueueUpdateDraw(func() {
+					t.showStatusMessage(fmt.Sprintf("Failed to %s container: %v", verb, err))
+				})
+			}
 		}
 	}()
 	return true
@@ -189,12 +218,26 @@ func (t *Tui) handleContainerRemove() bool {
 	t.updateLocalCache(container.ID, actionRemoving)
 	t.drawContainers()
 
+	// Track the action goroutine for proper cleanup
+	t.actionsWG.Add(1)
 	go func() {
-		cmd := exec.Command("docker", "rm", string(container.ID))
+		defer t.actionsWG.Done()
+
+		// Use the shared actions context with timeout to prevent hanging
+		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "docker", "rm", string(container.ID))
 		if err := cmd.Run(); err != nil {
-			t.app.QueueUpdateDraw(func() {
-				t.showStatusMessage(fmt.Sprintf("Failed to remove container: %v", err))
-			})
+			if ctx.Err() == context.DeadlineExceeded {
+				t.app.QueueUpdateDraw(func() {
+					t.showStatusMessage("Remove container timed out")
+				})
+			} else {
+				t.app.QueueUpdateDraw(func() {
+					t.showStatusMessage(fmt.Sprintf("Failed to remove container: %v", err))
+				})
+			}
 		}
 	}()
 	return true
