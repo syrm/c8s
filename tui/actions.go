@@ -77,13 +77,17 @@ func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
 }
 
 // updateLocalCache updates the local container cache with a pending action.
+// This is an optimization to avoid waiting for the next refresh cycle.
 func (t *Tui) updateLocalCache(containerID dto.ContainerID, action string) {
 	t.tableContainerDataLock.Lock()
+	defer t.tableContainerDataLock.Unlock()
+
 	if c, ok := t.tableContainerData[containerID]; ok {
+		// Create a new container struct with the updated pending action
+		// This is necessary because dto.Container is a value type in the map
 		c.PendingAction = action
 		t.tableContainerData[containerID] = c
 	}
-	t.tableContainerDataLock.Unlock()
 }
 
 // handleContainerShell opens an interactive shell in the selected container.

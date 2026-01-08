@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -39,6 +40,14 @@ type Docker struct {
 	requestData       <-chan dto.RequestData
 	logger            *slog.Logger
 	done              chan struct{} // Signals when Run() has completed
+	// statsContexts tracks active stats goroutines to prevent leaks
+	// Key: container ID, Value: cancel function for the stats goroutine
+	statsContexts     map[dto.ContainerID]context.CancelFunc
+	statsContextsLock sync.Mutex
+	// logContexts tracks active log collection contexts to allow cancellation
+	// Key: container ID, Value: cancel function for the log collection
+	logContexts       map[dto.ContainerID]context.CancelFunc
+	logContextsLock   sync.Mutex
 }
 
 // NewDocker creates a new Docker client and initializes monitoring infrastructure.
@@ -61,6 +70,8 @@ func NewDocker(
 		requestData:       requestData,
 		logger:            logger,
 		done:              make(chan struct{}),
+		statsContexts:     make(map[dto.ContainerID]context.CancelFunc),
+		logContexts:       make(map[dto.ContainerID]context.CancelFunc),
 	}, nil
 }
 
@@ -128,6 +139,9 @@ func (d *Docker) handleRequests(ctx context.Context) {
 			case *dto.RequestProjectList:
 				d.handleRequestProjectList(ctx, r)
 
+			case *dto.RequestStopLogCollection:
+				d.handleRequestStopLogCollection(ctx, r)
+
 			default:
 				d.logger.Warn("unknown request type", slog.String("type", fmt.Sprintf("%T", req)))
 			}
@@ -172,8 +186,17 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 		return
 	}
 
-	// Container exists - create cancel context for logs
+	// Container exists - create or get cancel context for logs
+	// First, cancel any existing log collection for this container
+	d.logContextsLock.Lock()
+	if oldCancel, exists := d.logContexts[c.ID]; exists {
+		oldCancel()
+		delete(d.logContexts, c.ID)
+	}
+	// Create new log context
 	ctxLog, cancel := context.WithCancel(ctx)
+	d.logContexts[c.ID] = cancel
+	d.logContextsLock.Unlock()
 
 	// Atomically: check LogCollectionActive, start collection if needed, build DTO with logs
 	// All done inside the functor to avoid data races
@@ -198,7 +221,6 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 				Status:           container.Status,
 				PendingAction:    container.PendingAction,
 				Logs:             make([]string, len(container.Logs)),
-				LogCancel:        cancel,
 			}
 			copy(dtoContainer.Logs, container.Logs)
 			dtoResponse <- dtoContainer
@@ -206,10 +228,16 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	}:
 	case <-time.After(dto.ChannelTimeout):
 		d.logger.Warn("timeout sending to container command in handleRequestContainerLog")
+		d.logContextsLock.Lock()
+		delete(d.logContexts, c.ID)
+		d.logContextsLock.Unlock()
 		cancel()
 		r.Response <- dto.Container{}
 		return
 	case <-ctx.Done():
+		d.logContextsLock.Lock()
+		delete(d.logContexts, c.ID)
+		d.logContextsLock.Unlock()
 		cancel()
 		r.Response <- dto.Container{}
 		return
@@ -365,6 +393,17 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 	}
 }
 
+func (d *Docker) handleRequestStopLogCollection(ctx context.Context, r *dto.RequestStopLogCollection) {
+	d.logContextsLock.Lock()
+	defer d.logContextsLock.Unlock()
+
+	if cancel, exists := d.logContexts[r.ContainerID]; exists {
+		cancel()
+		delete(d.logContexts, r.ContainerID)
+		d.logger.DebugContext(ctx, "stopped log collection", slog.String("container_id", string(r.ContainerID)))
+	}
+}
+
 func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	if c == nil {
 		return
@@ -433,6 +472,10 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	}()
 
 	// Main loop: receive lines or handle context cancellation
+	// Use a reusable timer to prevent resource leaks
+	sendTimer := startTimer(time.Second)
+	defer stopTimer(sendTimer)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -446,13 +489,17 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 				return
 			}
 			// Use select with timeout to avoid blocking forever on container command
+			// Reset timer for this iteration
+			stopTimer(sendTimer)
+			sendTimer.Reset(time.Second)
+
 			select {
 			case c.Command <- ContainerCommand{
 				functor: func(container *Container) {
 					container.AppendLog(line)
 				},
 			}:
-			case <-time.After(time.Second):
+			case <-sendTimer.C:
 				// Timeout sending log, container might be busy or deleted
 			case <-ctx.Done():
 				out.Close()
@@ -473,6 +520,27 @@ const (
 	// initialContainerMapSize is the initial capacity for the containers map.
 	initialContainerMapSize = 256
 )
+
+// startTimer creates a new timer with proper cleanup to prevent resource leaks.
+// Always call defer stopTimer() on the returned timer.
+func startTimer(duration time.Duration) *time.Timer {
+	t := time.NewTimer(duration)
+	return t
+}
+
+// stopTimer stops a timer if it hasn't already fired, preventing resource leaks.
+// Safe to call multiple times on the same timer.
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		if !t.Stop() {
+			// If the timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.C:
+			default:
+			}
+		}
+	}
+}
 
 func (d *Docker) collectContainers(ctx context.Context) error {
 	listCtx, cancel := context.WithTimeout(ctx, dockerAPITimeout)
@@ -552,7 +620,14 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		return
 	}
 
-	go d.getContainerStatsRealtime(ctx, c)
+	// Create a dedicated context for stats collection and track it
+	statsCtx, statsCancel := context.WithCancel(ctx)
+
+	d.statsContextsLock.Lock()
+	d.statsContexts[c.ID] = statsCancel
+	d.statsContextsLock.Unlock()
+
+	go d.getContainerStatsRealtime(statsCtx, c)
 }
 
 func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
@@ -702,6 +777,14 @@ func (d *Docker) handleEvents(ctx context.Context) {
 				}
 
 				if msg.Action == events.ActionDestroy {
+					// Cancel the stats goroutine before deleting the container
+					d.statsContextsLock.Lock()
+					if statsCancel, exists := d.statsContexts[c.ID]; exists {
+						statsCancel()
+						delete(d.statsContexts, c.ID)
+					}
+					d.statsContextsLock.Unlock()
+
 					select {
 					case d.containersCommand <- ContainersCommand{
 						functor: func(docker *Docker) *Container {
@@ -717,9 +800,20 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					}
 				}
 
-				// Restart stats streaming when container starts
+				// Restart stats streaming when container starts or unpauses
+				// First cancel the old stats goroutine to prevent leaks
 				if msg.Action == events.ActionStart || msg.Action == events.ActionUnPause {
-					go d.getContainerStatsRealtime(ctx, c)
+					d.statsContextsLock.Lock()
+					// Cancel old stats goroutine if it exists
+					if oldCancel, exists := d.statsContexts[c.ID]; exists {
+						oldCancel()
+					}
+					// Create new context for stats goroutine
+					statsCtx, statsCancel := context.WithCancel(ctx)
+					d.statsContexts[c.ID] = statsCancel
+					d.statsContextsLock.Unlock()
+
+					go d.getContainerStatsRealtime(statsCtx, c)
 				}
 				continue
 			}

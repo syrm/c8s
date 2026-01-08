@@ -2,9 +2,12 @@ package tui
 
 import (
 	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/syrm/c8s/dto"
 )
 
 // setupStylesOnce ensures styles are only configured once.
@@ -312,6 +315,16 @@ func (t *Tui) setupLogViewHandler() {
 
 // exitLogView handles navigation from log view back to container list.
 func (t *Tui) exitLogView() {
+	// Stop log collection for the current container
+	currentContainerID := t.getCurrentContainerID()
+	if currentContainerID != "" {
+		select {
+		case t.requestData <- &dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)}:
+		case <-time.After(channelTimeout):
+			// Timeout is acceptable here, we're exiting anyway
+		}
+	}
+
 	t.tableContainer.Clear()
 	t.drawContainers()
 	t.pages.SwitchToPage("containerList")

@@ -1,7 +1,5 @@
 package dto
 
-import "context"
-
 // Container status constants.
 const (
 	StatusRunning    = "running"
@@ -26,7 +24,6 @@ type Container struct {
 	Logs             []string
 	Status           string
 	PendingAction    string // "starting", "stopping", "restarting", "removing" or ""
-	LogCancel        context.CancelFunc
 }
 
 // ContainerProject contains the project information for a container.

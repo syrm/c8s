@@ -45,6 +45,7 @@ type Tui struct {
 	logFilter                  string
 	logFilterLock              sync.RWMutex
 	statusTimer                *time.Timer
+	statusTimerLock            sync.Mutex
 	logFilterInput             *tview.InputField
 	logLayout                  *tview.Flex
 	currentView                currentView
@@ -494,7 +495,10 @@ func (t *Tui) showStatusMessage(message string) {
 	t.statusBar.SetText("[red]" + escaped + "[-]")
 	t.containerLayout.AddItem(t.statusBar, 1, 0, false)
 
-	// Cancel previous timer if exists
+	// Cancel previous timer if exists - protected by mutex
+	t.statusTimerLock.Lock()
+	defer t.statusTimerLock.Unlock()
+
 	if t.statusTimer != nil {
 		t.statusTimer.Stop()
 	}
@@ -602,36 +606,22 @@ func (t *Tui) getData(ctx context.Context) {
 	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 
-	var ctxCancel context.CancelFunc
-
 	for {
 		select {
 		case <-ctx.Done():
-			// Clean up log context when shutting down
-			if ctxCancel != nil {
-				ctxCancel()
-			}
 			return
 
 		case <-ticker.C:
 			cv := t.getCurrentView()
 			switch cv {
 			case viewProjectList:
-				if ctxCancel != nil {
-					ctxCancel()
-					ctxCancel = nil
-				}
 				t.refreshProjectList()
 
 			case viewProject:
-				if ctxCancel != nil {
-					ctxCancel()
-					ctxCancel = nil
-				}
 				t.refreshContainerList()
 
 			case viewContainerLog:
-				ctxCancel = t.refreshContainerLog(ctx, ctxCancel)
+				t.refreshContainerLog(ctx)
 			}
 		}
 	}
@@ -698,33 +688,24 @@ func (t *Tui) refreshContainerList() {
 	}
 }
 
-func (t *Tui) refreshContainerLog(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
+func (t *Tui) refreshContainerLog(ctx context.Context) {
 	if t.getLogPaused() {
-		return ctxCancel
+		return
 	}
 
 	if t.getContainerDisappeared() {
-		return t.handleDisappearedContainer(ctx, ctxCancel)
+		t.handleDisappearedContainer(ctx)
+		return
 	}
 
 	currentContainerID := t.getCurrentContainerID()
 	t.logger.DebugContext(ctx, "fetching logs for container", slog.String("container_id", currentContainerID))
 
-	// First time we enter this view, start the log collection
-	if ctxCancel == nil {
-		return t.startLogCollection(ctx)
-	}
-
-	// Get the latest logs (only when ctxCancel is already set)
-	return t.updateLogs(ctx, ctxCancel)
+	// Always update logs - the Docker layer manages the log collection lifecycle
+	t.updateLogs(ctx)
 }
 
-func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
-	// If we haven't started log collection yet for the reappeared container
-	if ctxCancel == nil {
-		return t.tryReconnectContainer(ctx)
-	}
-
+func (t *Tui) handleDisappearedContainer(ctx context.Context) {
 	currentContainerID := t.getCurrentContainerID()
 
 	// Log collection is running, check if we have logs now
@@ -733,7 +714,7 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout sending container log request in handleDisappearedContainer")
-		return ctxCancel
+		return
 	}
 
 	var c dto.Container
@@ -741,22 +722,20 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 	case c = <-response:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout waiting for container log response in handleDisappearedContainer")
-		return ctxCancel
+		return
 	}
 
 	if c.ID == "" {
 		// Container disappeared again!
 		t.logger.DebugContext(ctx, "container disappeared again")
-		if ctxCancel != nil {
-			ctxCancel()
-		}
-		return nil
+		t.tryReconnectContainer(ctx)
+		return
 	}
 
 	// Wait until we have actual logs before hiding the modal
 	if len(c.Logs) == 0 {
 		t.logger.DebugContext(ctx, "still waiting for logs...")
-		return ctxCancel
+		return
 	}
 
 	// We have logs! Update them and close the modal
@@ -768,11 +747,9 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context, ctxCancel context.
 		t.drawContainerLog()
 		t.pages.HidePage("modal")
 	})
-
-	return ctxCancel
 }
 
-func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
+func (t *Tui) tryReconnectContainer(ctx context.Context) {
 	currentContainerService := t.getCurrentContainerService()
 	currentProjectID := t.getCurrentProjectID()
 
@@ -785,7 +762,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: responseProject}:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout sending project request in tryReconnectContainer")
-		return nil
+		return
 	}
 
 	var containers []dto.Container
@@ -793,7 +770,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 	case containers = <-responseProject:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout waiting for project response in tryReconnectContainer")
-		return nil
+		return
 	}
 
 	var foundContainer *dto.Container
@@ -808,7 +785,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 	}
 
 	if foundContainer == nil {
-		return nil
+		return
 	}
 
 	// Container reappeared! Start log collection ONCE
@@ -825,7 +802,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(newContainerID), Response: response}:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout sending container log request in tryReconnectContainer")
-		return nil
+		return
 	}
 
 	var c dto.Container
@@ -833,19 +810,18 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) context.CancelFunc {
 	case c = <-response:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout waiting for container log response in tryReconnectContainer")
-		return nil
+		return
 	}
 
 	if c.ID == "" {
 		t.logger.DebugContext(ctx, "container reappeared but logs not ready yet")
-		return nil
+		return
 	}
 
 	t.logger.DebugContext(ctx, "log collection started, waiting for logs...")
-	return c.LogCancel
 }
 
-func (t *Tui) startLogCollection(ctx context.Context) context.CancelFunc {
+func (t *Tui) startLogCollection(ctx context.Context) {
 	currentContainerID := t.getCurrentContainerID()
 	currentContainerName := t.getCurrentContainerName()
 
@@ -854,7 +830,7 @@ func (t *Tui) startLogCollection(ctx context.Context) context.CancelFunc {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout sending container log request in startLogCollection")
-		return nil
+		return
 	}
 
 	var c dto.Container
@@ -862,7 +838,7 @@ func (t *Tui) startLogCollection(ctx context.Context) context.CancelFunc {
 	case c = <-response:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout waiting for container log response in startLogCollection")
-		return nil
+		return
 	}
 
 	if c.ID == "" {
@@ -879,12 +855,11 @@ func (t *Tui) startLogCollection(ctx context.Context) context.CancelFunc {
 			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", currentContainerName, displayID))
 			t.pages.ShowPage("modal")
 		})
-		return nil
+		return
 	}
-	return c.LogCancel
 }
 
-func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) context.CancelFunc {
+func (t *Tui) updateLogs(ctx context.Context) {
 	currentContainerID := t.getCurrentContainerID()
 	currentContainerName := t.getCurrentContainerName()
 
@@ -893,7 +868,7 @@ func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) cont
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout sending container log request in updateLogs")
-		return ctxCancel
+		return
 	}
 
 	var c dto.Container
@@ -901,15 +876,11 @@ func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) cont
 	case c = <-response:
 	case <-time.After(channelTimeout):
 		t.logger.Warn("timeout waiting for container log response in updateLogs")
-		return ctxCancel
+		return
 	}
 
 	if c.ID == "" {
 		// Container no longer exists, show modal
-		if ctxCancel != nil {
-			ctxCancel()
-		}
-
 		t.setContainerDisappeared(true)
 
 		// Safe substring for container ID display
@@ -922,7 +893,7 @@ func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) cont
 			t.containerDisappearedModal.SetText(fmt.Sprintf("Container %s (%s) no longer exists.\nWaiting for it to reappear or press OK to return to container list.", currentContainerName, displayID))
 			t.pages.ShowPage("modal")
 		})
-		return nil
+		return
 	}
 
 	// Only update logs if we have some (don't erase existing logs with empty array)
@@ -933,8 +904,6 @@ func (t *Tui) updateLogs(ctx context.Context, ctxCancel context.CancelFunc) cont
 	t.app.QueueUpdateDraw(func() {
 		t.drawContainerLog()
 	})
-
-	return ctxCancel
 }
 
 func (t *Tui) Render(ctx context.Context) error {
@@ -957,10 +926,13 @@ func (t *Tui) cleanup() {
 	t.closing = true
 	t.closingLock.Unlock()
 
-	// Stop all timers
+	// Stop all timers - protected by mutex
+	t.statusTimerLock.Lock()
 	if t.statusTimer != nil {
 		t.statusTimer.Stop()
 	}
+	t.statusTimerLock.Unlock()
+
 	t.stopContainerRefreshTimer()
 	t.stopProjectRefreshTimer()
 
