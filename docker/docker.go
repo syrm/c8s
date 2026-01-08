@@ -66,7 +66,7 @@ func NewDocker(
 		client:            cli,
 		// Pre-allocate map for typical Docker Compose setups
 		containers:        make(map[dto.ContainerID]*Container, initialContainerMapSize),
-		containersCommand: make(chan ContainersCommand),
+		containersCommand: make(chan ContainersCommand, 16), // Buffered to prevent blocking senders
 		requestData:       requestData,
 		logger:            logger,
 		done:              make(chan struct{}),
@@ -151,7 +151,7 @@ func (d *Docker) handleRequests(ctx context.Context) {
 
 func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) {
 	// Get container via containersCommand
-	response := make(chan *Container)
+	response := make(chan *Container, 1)
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -199,18 +199,24 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	d.logContextsLock.Unlock()
 
 	// Atomically: check LogCollectionActive, start collection if needed, build DTO with logs
-	// All done inside the functor to avoid data races
+	// All done inside the functor which is executed by handleCommands (serialized access)
 	dtoResponse := make(chan dto.Container, 1)
 	select {
 	case c.Command <- ContainerCommand{
 		functor: func(container *Container) {
-			// Start log collection if not active (synchronized access)
+			if container.deleted.Load() {
+				dtoResponse <- dto.Container{}
+				return
+			}
+
+			// Start log collection if not active (synchronized access via handleCommands)
 			if !container.LogCollectionActive {
 				container.LogCollectionActive = true
 				go d.collectContainerLogs(ctxLog, container)
 			}
 
-			// Build DTO with logs copy (synchronized access to Logs)
+			// Build DTO with logs copy
+			// No lock needed because handleCommands serializes all access
 			dtoContainer := dto.Container{
 				ID:               container.ID,
 				Project:          container.Project,
@@ -258,21 +264,22 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 }
 
 func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.RequestProject) {
-	var containers []dto.Container
+	// Use a channel to collect results from the functor to avoid data race
+	resultsChan := make(chan dto.Container, 10) // Buffered to prevent blocking
 
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
 			for _, c := range docker.containers {
 				if r.ProjectID == c.Project.ID {
-					response := make(chan ContainerResponse)
+					response := make(chan ContainerResponse, 1) // Buffered!
 					select {
 					case c.Command <- ContainerCommand{
 						response: response,
 					}:
 						select {
 						case container := <-response:
-							containers = append(containers, containerResponseToDTO(container))
+							resultsChan <- containerResponseToDTO(container)
 						case <-time.After(dto.ChannelTimeout):
 							// Skip this container if timeout
 						}
@@ -281,16 +288,27 @@ func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.Reque
 					}
 				}
 			}
-			r.Response <- containers
+			close(resultsChan)
 			return nil
 		},
 	}:
 	case <-time.After(dto.ChannelTimeout):
 		d.logger.Warn("timeout sending to containersCommand in handleRequestContainerProject")
-		r.Response <- containers
+		close(resultsChan)
+		r.Response <- nil
+		return
 	case <-ctx.Done():
-		r.Response <- containers
+		close(resultsChan)
+		r.Response <- nil
+		return
 	}
+
+	// Collect results from the channel
+	var containers []dto.Container
+	for container := range resultsChan {
+		containers = append(containers, container)
+	}
+	r.Response <- containers
 }
 
 func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.RequestSetPendingAction) {
@@ -331,7 +349,7 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 			projects := make(map[dto.ProjectID]dto.Project)
 
 			for _, c := range docker.containers {
-				response := make(chan ContainerResponse)
+				response := make(chan ContainerResponse, 1) // Buffered!
 				select {
 				case c.Command <- ContainerCommand{
 					response: response,
@@ -434,10 +452,24 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		return
 	}
 
-	defer out.Close()
-
 	// Use a pipe to demultiplex the Docker log stream
 	pr, pw := io.Pipe()
+
+	// Track cleanup to avoid double close
+	var outClosed, prClosed bool
+	var closeOnce sync.Once
+	closeResources := func() {
+		closeOnce.Do(func() {
+			if !outClosed {
+				out.Close()
+				outClosed = true
+			}
+			if !prClosed {
+				pr.Close()
+				prClosed = true
+			}
+		})
+	}
 
 	// Channel to receive lines from the reader goroutine
 	lines := make(chan string, logLineBufferSize)
@@ -445,6 +477,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	// Goroutine to handle stdcopy
 	go func() {
 		defer pw.Close()
+		defer closeResources()
 		_, err := stdcopy.StdCopy(pw, pw, out)
 		if err != nil && !errors.Is(err, io.EOF) {
 			d.logger.DebugContext(ctx, "stdcopy finished", slog.String("container_id", string(c.ID)), slog.Any("error", err))
@@ -454,6 +487,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	// Goroutine to read lines (this is the blocking I/O)
 	go func() {
 		defer close(lines)
+		defer closeResources()
 		reader := bufio.NewReader(pr)
 		for {
 			line, errReader := reader.ReadString('\n')
@@ -480,8 +514,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		select {
 		case <-ctx.Done():
 			d.logger.DebugContext(ctx, "collectContainerLogs context is done", slog.String("container_id", string(c.ID)))
-			out.Close() // Unblock stdcopy goroutine
-			pr.Close()  // Unblock reader goroutine
+			closeResources() // Unblock stdcopy and reader goroutines
 			return
 		case line, ok := <-lines:
 			if !ok {
@@ -502,8 +535,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 			case <-sendTimer.C:
 				// Timeout sending log, container might be busy or deleted
 			case <-ctx.Done():
-				out.Close()
-				pr.Close()
+				closeResources()
 				return
 			}
 		}
@@ -574,7 +606,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		Name: dockerContainer.Labels["com.docker.compose.project"],
 	}
 
-	response := make(chan *Container)
+	response := make(chan *Container, 1)
 	select {
 	case d.containersCommand <- ContainersCommand{
 		functor: func(docker *Docker) *Container {
@@ -738,7 +770,7 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			}
 			d.logger.DebugContext(ctx, "event", slog.String("action", string(msg.Action)), slog.String("container_id", msg.Actor.ID))
 
-			response := make(chan *Container)
+			response := make(chan *Container, 1)
 			select {
 			case d.containersCommand <- ContainersCommand{
 				functor: func(docker *Docker) *Container {
@@ -784,6 +816,14 @@ func (d *Docker) handleEvents(ctx context.Context) {
 						delete(d.statsContexts, c.ID)
 					}
 					d.statsContextsLock.Unlock()
+
+					// Cancel the log collection goroutine before deleting the container
+					d.logContextsLock.Lock()
+					if logCancel, exists := d.logContexts[c.ID]; exists {
+						logCancel()
+						delete(d.logContexts, c.ID)
+					}
+					d.logContextsLock.Unlock()
 
 					select {
 					case d.containersCommand <- ContainersCommand{

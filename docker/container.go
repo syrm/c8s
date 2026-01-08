@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"sync/atomic"
 
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -20,6 +21,8 @@ const (
 )
 
 // Container represents a Docker container with its state and metrics.
+// All access is serialized through the Command channel via handleCommands.
+// This design eliminates the need for per-container mutexes and avoids deadlocks.
 type Container struct {
 	ID                  dto.ContainerID
 	Service             string
@@ -33,6 +36,8 @@ type Container struct {
 	LogCollectionActive bool
 	Command             chan ContainerCommand
 	cancel              context.CancelFunc
+	// deleted uses atomic for lock-free reads (write-once)
+	deleted atomic.Bool
 }
 
 // ContainerResponse is a snapshot of container state sent through response channels.
@@ -51,7 +56,7 @@ type ContainerResponse struct {
 // It uses a functor pattern to serialize access to the container state.
 type ContainerCommand struct {
 	functor  func(*Container)
-	response chan ContainerResponse
+	response chan ContainerResponse // Must be buffered to prevent deadlock!
 }
 
 // NewContainer creates a new Container from a Docker API container summary.
@@ -85,7 +90,7 @@ func NewContainer(
 		ID:      dto.ContainerID(dockerContainer.ID),
 		Service: dockerContainer.Labels["com.docker.compose.service"],
 		Name:    containerName,
-		Command: make(chan ContainerCommand),
+		Command: make(chan ContainerCommand, 8), // Buffered to prevent blocking senders
 		Project: project,
 		cancel:  cancel,
 		Status:  status,
@@ -107,6 +112,9 @@ func (c *Container) handleCommands(ctx context.Context) {
 			}
 
 			if cmd.response != nil {
+				// Create snapshot AFTER functor execution
+				// No lock needed because handleCommands is the only modifier
+				// and this code runs in the same goroutine
 				cmd.response <- ContainerResponse{
 					ID:               c.ID,
 					Project:          c.Project,
@@ -125,6 +133,9 @@ func (c *Container) handleCommands(ctx context.Context) {
 const maxLogLines = 1000
 
 func (c *Container) AppendLog(line string) {
+	if c.deleted.Load() {
+		return
+	}
 	c.Logs = append(c.Logs, line)
 	// Limit log size to prevent memory leak
 	if len(c.Logs) > maxLogLines {
@@ -136,11 +147,15 @@ func (c *Container) AppendLog(line string) {
 }
 
 func (c *Container) Delete() {
+	c.deleted.Store(true)
 	c.cancel()
 	c.Logs = nil // Clear logs to free memory
 }
 
 func (c *Container) SetStatusFromAction(action events.Action) {
+	if c.deleted.Load() {
+		return
+	}
 	newStatus := statusFromAction(action)
 	// Only update status if the action represents a known state change
 	if newStatus != "" {
@@ -151,6 +166,9 @@ func (c *Container) SetStatusFromAction(action events.Action) {
 }
 
 func (c *Container) SetPendingAction(action string) {
+	if c.deleted.Load() {
+		return
+	}
 	c.PendingAction = action
 }
 
@@ -180,6 +198,9 @@ func statusFromAction(action events.Action) string {
 
 
 func (c *Container) Update(stats apiContainer.StatsResponse) {
+	if c.deleted.Load() {
+		return
+	}
 	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)
 	c.updateMemoryPercentage(stats.MemoryStats)
 }
