@@ -115,9 +115,9 @@ func (t *Tui) setupProjectTableHandler() {
 
 // enterContainerView handles navigation from project list to container list.
 func (t *Tui) enterContainerView() {
-	rowIndex, rowCount := t.tableProject.GetSelection()
-	// Validate row index: must be > 0 (skip header) and < rowCount
-	if rowIndex <= 0 || rowIndex >= rowCount {
+	rowIndex, _ := t.tableProject.GetSelection()
+	// Validate row index: must be > 0 (skip header)
+	if rowIndex <= 0 {
 		return
 	}
 	cell := t.tableProject.GetCell(rowIndex, 0)
@@ -245,9 +245,9 @@ func (t *Tui) exitContainerView() {
 
 // enterLogView handles navigation from container list to log view.
 func (t *Tui) enterLogView() {
-	rowIndex, rowCount := t.tableContainer.GetSelection()
-	// Validate row index: must be > 0 (skip header) and < rowCount
-	if rowIndex <= 0 || rowIndex >= rowCount {
+	rowIndex, _ := t.tableContainer.GetSelection()
+	// Validate row index: must be > 0 (skip header)
+	if rowIndex <= 0 {
 		return
 	}
 	cell := t.tableContainer.GetCell(rowIndex, 0)
@@ -329,7 +329,7 @@ func (t *Tui) exitLogView() {
 		timer := time.NewTimer(channelTimeout)
 		select {
 		case t.requestData <- &dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)}:
-			timer.Stop()
+			stopTimer(timer)
 		case <-timer.C:
 			// Timeout is acceptable here, we're exiting anyway
 		}
@@ -489,7 +489,13 @@ func (t *Tui) stopContainerRefreshTimer() {
 	t.containerRefreshTimerLock.Lock()
 	defer t.containerRefreshTimerLock.Unlock()
 	if t.containerRefreshTimer != nil {
-		t.containerRefreshTimer.Stop()
+		if !t.containerRefreshTimer.Stop() {
+			// Timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.containerRefreshTimer.C:
+			default:
+			}
+		}
 		t.containerRefreshTimer = nil
 	}
 }
@@ -506,7 +512,13 @@ func (t *Tui) stopProjectRefreshTimer() {
 	t.projectRefreshTimerLock.Lock()
 	defer t.projectRefreshTimerLock.Unlock()
 	if t.projectRefreshTimer != nil {
-		t.projectRefreshTimer.Stop()
+		if !t.projectRefreshTimer.Stop() {
+			// Timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.projectRefreshTimer.C:
+			default:
+			}
+		}
 		t.projectRefreshTimer = nil
 	}
 }

@@ -9,7 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"os"
+	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,16 +51,66 @@ type Docker struct {
 	// Key: container ID, Value: cancel function for the log collection
 	logContexts       map[dto.ContainerID]context.CancelFunc
 	logContextsLock   sync.Mutex
+	// logCollectorsWG tracks log collection goroutines for clean shutdown
+	logCollectorsWG   sync.WaitGroup
+	// statsWG tracks stats goroutines for clean shutdown
+	statsWG           sync.WaitGroup
+}
+
+// findPodmanSocket runs "podman system info" to get the socket path.
+// Returns the socket URL (e.g., "unix:///path/to/socket") if found, empty string otherwise.
+func findPodmanSocket() string {
+	cmd := exec.Command("podman", "system", "info", "--format", "unix://{{.Host.RemoteSocket.Path}}")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	socketPath := string(output)
+	// Trim whitespace and newlines
+	socketPath = strings.TrimSpace(socketPath)
+	// Verify it's a valid unix socket path
+	if socketPath != "" && strings.HasPrefix(socketPath, "unix://") {
+		return socketPath
+	}
+	return ""
 }
 
 // NewDocker creates a new Docker client and initializes monitoring infrastructure.
 // It returns an error if the Docker client cannot be created.
+// If DOCKER_HOST is not set, it attempts to use the Podman socket if available.
 func NewDocker(
 	ctx context.Context,
 	requestData <-chan dto.RequestData,
 	logger *slog.Logger,
 ) (*Docker, error) {
-	cli, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
+	// Check if DOCKER_HOST is set
+	dockerHost := os.Getenv("DOCKER_HOST")
+
+	var opts []dockerClient.Opt
+	if dockerHost == "" {
+		// DOCKER_HOST not set, try to find Podman socket
+		if podmanSocket := findPodmanSocket(); podmanSocket != "" {
+			logger.Info("using Podman socket", "socket", podmanSocket)
+			opts = []dockerClient.Opt{
+				dockerClient.WithHost(podmanSocket),
+				dockerClient.WithAPIVersionNegotiation(),
+			}
+		} else {
+			// No Podman socket found, use default (FromEnv)
+			opts = []dockerClient.Opt{
+				dockerClient.FromEnv,
+				dockerClient.WithAPIVersionNegotiation(),
+			}
+		}
+	} else {
+		// DOCKER_HOST is set, use it
+		opts = []dockerClient.Opt{
+			dockerClient.FromEnv,
+			dockerClient.WithAPIVersionNegotiation(),
+		}
+	}
+
+	cli, err := dockerClient.NewClientWithOpts(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating docker client: %w", err)
 	}
@@ -106,6 +159,12 @@ func (d *Docker) Run(ctx context.Context) {
 	if err := eg.Wait(); err != nil {
 		d.logger.ErrorContext(errCtx, "error in Docker Run", slog.Any("error", err))
 	}
+
+	// Wait for all log collection goroutines to finish
+	d.logCollectorsWG.Wait()
+
+	// Wait for all stats goroutines to finish
+	d.statsWG.Wait()
 }
 
 // Wait blocks until Run() has completed.
@@ -153,7 +212,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	// Get container via containersCommand
 	response := make(chan *Container, 1)
 	timer1 := time.NewTimer(dto.ChannelTimeout)
-	defer timer1.Stop()
+	defer stopTimer(timer1)
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -200,11 +259,12 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	d.logContexts[c.ID] = cancel
 	d.logContextsLock.Unlock()
 
-	// Atomically: check LogCollectionActive, start collection if needed, build DTO with logs
-	// All done inside the functor which is executed by handleCommands (serialized access)
+	// Check if log collection is already active and get current logs
+	// Use functor for serialized access to container state
 	dtoResponse := make(chan dto.Container, 1)
+	startCollection := make(chan bool, 1)
 	timer2 := time.NewTimer(dto.ChannelTimeout)
-	defer timer2.Stop()
+	defer stopTimer(timer2)
 
 	select {
 	case c.Command <- ContainerCommand{
@@ -214,13 +274,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 				return
 			}
 
-			// Start log collection if not active (synchronized access via handleCommands)
-			if !container.LogCollectionActive {
-				container.LogCollectionActive = true
-				go d.collectContainerLogs(ctxLog, container)
-			}
-
-			// Build DTO with logs copy
+			// Build DTO with logs copy - MUST SEND THIS FIRST to avoid deadlock
 			// No lock needed because handleCommands serializes all access
 			dtoContainer := dto.Container{
 				ID:               container.ID,
@@ -235,6 +289,14 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 			}
 			copy(dtoContainer.Logs, container.Logs)
 			dtoResponse <- dtoContainer
+
+			// Check if log collection is already active and signal AFTER sending response
+			needStart := !container.LogCollectionActive
+			if needStart {
+				container.LogCollectionActive = true
+			}
+			// This send won't block because channel is buffered
+			startCollection <- needStart
 		},
 	}:
 	case <-timer2.C:
@@ -254,27 +316,49 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 		return
 	}
 
-	// Wait for DTO and send response
+	// Wait for DTO response
+	var dtoContainer dto.Container
 	timer3 := time.NewTimer(dto.ChannelTimeout)
-	defer timer3.Stop()
+	defer stopTimer(timer3)
 	select {
-	case dtoContainer := <-dtoResponse:
-		r.Response <- dtoContainer
+	case dtoContainer = <-dtoResponse:
 	case <-timer3.C:
 		d.logger.Warn("timeout waiting for dto in handleRequestContainerLog")
 		cancel()
 		r.Response <- dto.Container{}
+		return
 	case <-ctx.Done():
 		cancel()
 		r.Response <- dto.Container{}
+		return
 	}
+
+	// Check if we need to start log collection
+	timer4 := time.NewTimer(dto.ChannelTimeout)
+	defer stopTimer(timer4)
+	select {
+	case needStart := <-startCollection:
+		if needStart {
+			// Start log collection goroutine with WaitGroup tracking
+			d.logCollectorsWG.Add(1)
+			go func() {
+				defer d.logCollectorsWG.Done()
+				d.collectContainerLogs(ctxLog, c)
+			}()
+		}
+	case <-timer4.C:
+		d.logger.Warn("timeout waiting for startCollection signal")
+		// Continue anyway, we have the DTO
+	}
+
+	r.Response <- dtoContainer
 }
 
 func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.RequestProject) {
 	// Use a channel to collect results from the functor to avoid data race
 	resultsChan := make(chan dto.Container, 10) // Buffered to prevent blocking
 	timer1 := time.NewTimer(dto.ChannelTimeout)
-	defer timer1.Stop()
+	defer stopTimer(timer1)
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -282,26 +366,26 @@ func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.Reque
 			for _, c := range docker.containers {
 				if r.ProjectID == c.Project.ID {
 					response := make(chan ContainerResponse, 1) // Buffered!
-					timer2 := time.NewTimer(dto.ChannelTimeout)
-					timer3 := time.NewTimer(dto.ChannelTimeout)
-					timer2.Stop()
-					timer3.Stop()
+					cmdTimer := time.NewTimer(dto.ChannelTimeout)
 					select {
 					case c.Command <- ContainerCommand{
 						response: response,
 					}:
-						timer2.Reset(dto.ChannelTimeout)
+						stopTimer(cmdTimer)
+						// Successfully sent command, now wait for response with timeout
+						timer2 := time.NewTimer(dto.ChannelTimeout)
 						select {
 						case container := <-response:
+							stopTimer(timer2)
 							resultsChan <- containerResponseToDTO(container)
 						case <-timer2.C:
+							stopTimer(timer2)
 							// Skip this container if timeout
 						}
-					case <-timer3.C:
+					case <-cmdTimer.C:
+						stopTimer(cmdTimer)
 						// Skip this container if timeout
 					}
-					timer2.Stop()
-					timer3.Stop()
 				}
 			}
 			close(resultsChan)
@@ -330,8 +414,8 @@ func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.Reque
 func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.RequestSetPendingAction) {
 	timer1 := time.NewTimer(dto.ChannelTimeout)
 	timer2 := time.NewTimer(dto.ChannelTimeout)
-	defer timer1.Stop()
-	defer timer2.Stop()
+	defer stopTimer(timer1)
+	defer stopTimer(timer2)
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -365,7 +449,7 @@ func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.Reque
 
 func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestProjectList) {
 	timer1 := time.NewTimer(dto.ChannelTimeout)
-	defer timer1.Stop()
+	defer stopTimer(timer1)
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -376,8 +460,8 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 				response := make(chan ContainerResponse, 1) // Buffered!
 				timer2 := time.NewTimer(dto.ChannelTimeout)
 				timer3 := time.NewTimer(dto.ChannelTimeout)
-				defer timer2.Stop()
-				defer timer3.Stop()
+				defer stopTimer(timer2)
+				defer stopTimer(timer3)
 
 				select {
 				case c.Command <- ContainerCommand{
@@ -458,7 +542,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	defer func() {
 		// Reset flag when collection ends
 		timer := time.NewTimer(time.Second)
-		defer timer.Stop()
+		defer stopTimer(timer)
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
@@ -480,6 +564,10 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	})
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container logs failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+		// Close the response body to prevent file descriptor leak
+		if out != nil {
+			out.Close()
+		}
 		return
 	}
 
@@ -514,7 +602,8 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		defer closeResources()
 		_, err := stdcopy.StdCopy(pw, pw, out)
 		if err != nil && !errors.Is(err, io.EOF) {
-			d.logger.DebugContext(ctx, "stdcopy finished", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+			d.logger.ErrorContext(ctx, "stdcopy finished with error", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+			return err
 		}
 		return nil
 	})
@@ -528,7 +617,8 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 			line, errReader := reader.ReadString('\n')
 			if errReader != nil {
 				if !errors.Is(errReader, io.EOF) {
-					d.logger.DebugContext(ctx, "end of container logs", slog.String("container_id", string(c.ID)), slog.Any("error", errReader))
+					d.logger.ErrorContext(ctx, "end of container logs with error", slog.String("container_id", string(c.ID)), slog.Any("error", errReader))
+					return errReader
 				}
 				return nil
 			}
@@ -580,7 +670,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		d.logger.DebugContext(ctx, "collectContainerLogs errgroup finished", slog.String("container_id", string(c.ID)), slog.Any("error", err))
+		d.logger.ErrorContext(ctx, "collectContainerLogs errgroup finished with error", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 	}
 }
 
@@ -652,9 +742,9 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	timer1 := time.NewTimer(dto.ChannelTimeout)
 	timer2 := time.NewTimer(dto.ChannelTimeout)
 	timer3 := time.NewTimer(dto.ChannelTimeout)
-	defer timer1.Stop()
-	defer timer2.Stop()
-	defer timer3.Stop()
+	defer stopTimer(timer1)
+	defer stopTimer(timer2)
+	defer stopTimer(timer3)
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -686,6 +776,10 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	}
 
 	c = NewContainer(ctx, dockerContainer, action, project)
+	if c == nil {
+		// Context was cancelled, don't create container
+		return
+	}
 
 	select {
 	case d.containersCommand <- ContainersCommand{
@@ -708,17 +802,24 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	d.statsContexts[c.ID] = statsCancel
 	d.statsContextsLock.Unlock()
 
-	go d.getContainerStatsRealtime(statsCtx, c)
+	d.statsWG.Add(1)
+	go func() {
+		defer d.statsWG.Done()
+		d.getContainerStatsRealtime(statsCtx, c)
+	}()
 }
 
 func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
+	// Capture the generation of this stats goroutine to check for restarts
+	myGen := c.statsGen.Load()
+
 	dockerContainerStats, err := d.client.ContainerStats(ctx, string(c.ID), true)
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container stats failed", slog.String("container_id", string(c.ID)), slog.Any("error", err))
 
 		// Mark container as exited instead of deleting
 		timer1 := time.NewTimer(dto.ChannelTimeout)
-		defer timer1.Stop()
+		defer stopTimer(timer1)
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
@@ -730,6 +831,11 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		case <-ctx.Done():
 		}
 
+		// Clean up the stats context entry to prevent memory leak
+		d.statsContextsLock.Lock()
+		delete(d.statsContexts, c.ID)
+		d.statsContextsLock.Unlock()
+
 		return
 	}
 
@@ -737,7 +843,7 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 	defer func() {
 		// Mark container as exited when stats streaming ends
 		timer2 := time.NewTimer(dto.ChannelTimeout)
-		defer timer2.Stop()
+		defer stopTimer(timer2)
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
@@ -754,15 +860,33 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 
 	for {
 		var stats apiContainer.StatsResponse
-		errDecode := dec.Decode(&stats)
-		if errDecode != nil {
-			if !errors.Is(errDecode, io.EOF) && !errors.Is(errDecode, context.DeadlineExceeded) {
-				d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
+		// Use a channel to receive decode result, with timeout for context cancellation
+		decodeResult := make(chan error, 1)
+		go func() {
+			decodeResult <- dec.Decode(&stats)
+		}()
+
+		select {
+		case errDecode := <-decodeResult:
+			if errDecode != nil {
+				if !errors.Is(errDecode, io.EOF) && !errors.Is(errDecode, context.DeadlineExceeded) {
+					d.logger.ErrorContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
+					break
+				}
+				d.logger.DebugContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
 				break
 			}
+		case <-ctx.Done():
+			d.logger.DebugContext(ctx, "container stats cancelled", slog.String("container_id", string(c.ID)))
+			return
+		}
 
-			d.logger.DebugContext(ctx, "end of container stats", slog.String("container_id", string(c.ID)), slog.Any("error", errDecode))
-			break
+		// Check if this goroutine is still the current generation (container hasn't restarted)
+		currentGen := c.statsGen.Load()
+		if currentGen != myGen {
+			// Container has restarted, this goroutine should exit
+			d.logger.DebugContext(ctx, "container stats goroutine outdated", slog.String("container_id", string(c.ID)), slog.Uint64("old_gen", myGen), slog.Uint64("new_gen", currentGen))
+			return
 		}
 
 		s := stats
@@ -770,16 +894,20 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 		select {
 		case c.Command <- ContainerCommand{
 			functor: func(container *Container) {
-				container.Update(s)
+				// Double-check generation before updating to prevent race condition
+				if container.statsGen.Load() == myGen {
+					container.Update(s)
+				}
 			},
 		}:
+			stopTimer(timer3)
 		case <-timer3.C:
 			// Skip this stats update if timeout
+			stopTimer(timer3)
 		case <-ctx.Done():
-			timer3.Stop()
+			stopTimer(timer3)
 			return
 		}
-		timer3.Stop()
 	}
 }
 
@@ -837,10 +965,10 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			}:
 			case <-timer1.C:
 				d.logger.Warn("timeout sending to containersCommand in handleEvents")
-				timer1.Stop()
+				stopTimer(timer1)
 				continue
 			case <-ctx.Done():
-				timer1.Stop()
+				stopTimer(timer1)
 				return
 			}
 			timer1.Stop()
@@ -851,10 +979,10 @@ func (d *Docker) handleEvents(ctx context.Context) {
 			case c = <-response:
 			case <-timer2.C:
 				d.logger.Warn("timeout waiting for response in handleEvents")
-				timer2.Stop()
+				stopTimer(timer2)
 				continue
 			case <-ctx.Done():
-				timer2.Stop()
+				stopTimer(timer2)
 				return
 			}
 			timer2.Stop()
@@ -867,13 +995,14 @@ func (d *Docker) handleEvents(ctx context.Context) {
 						container.SetStatusFromAction(msg.Action)
 					},
 				}:
+					stopTimer(timer3)
 				case <-timer3.C:
 					d.logger.Warn("timeout sending status update in handleEvents")
+					stopTimer(timer3)
 				case <-ctx.Done():
-					timer3.Stop()
+					stopTimer(timer3)
 					return
 				}
-				timer3.Stop()
 
 				if msg.Action == events.ActionDestroy {
 					// Cancel the stats goroutine before deleting the container
@@ -904,10 +1033,10 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					case <-timer4.C:
 						d.logger.Warn("timeout sending destroy command in handleEvents")
 					case <-ctx.Done():
-						timer4.Stop()
+						stopTimer(timer4)
 						return
 					}
-					timer4.Stop()
+					stopTimer(timer4)
 				}
 
 				// Restart stats streaming when container starts or unpauses
@@ -918,12 +1047,18 @@ func (d *Docker) handleEvents(ctx context.Context) {
 					if oldCancel, exists := d.statsContexts[c.ID]; exists {
 						oldCancel()
 					}
+					// Increment stats generation to invalidate old stats goroutines
+					c.statsGen.Add(1)
 					// Create new context for stats goroutine
 					statsCtx, statsCancel := context.WithCancel(ctx)
 					d.statsContexts[c.ID] = statsCancel
 					d.statsContextsLock.Unlock()
 
-					go d.getContainerStatsRealtime(statsCtx, c)
+					d.statsWG.Add(1)
+					go func() {
+						defer d.statsWG.Done()
+						d.getContainerStatsRealtime(statsCtx, c)
+					}()
 				}
 				continue
 			}

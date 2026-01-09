@@ -38,6 +38,10 @@ type Container struct {
 	cancel              context.CancelFunc
 	// deleted uses atomic for lock-free reads (write-once)
 	deleted atomic.Bool
+	// statsGen tracks the current generation of stats goroutine to prevent race conditions on restart
+	// When a container restarts, statsGen is incremented. Stats goroutines check if their
+	// generation matches before processing updates.
+	statsGen atomic.Uint64
 }
 
 // ContainerResponse is a snapshot of container state sent through response channels.
@@ -67,6 +71,11 @@ func NewContainer(
 	action events.Action,
 	project dto.ContainerProject,
 ) *Container {
+	// Don't create container if context is already cancelled
+	if ctx.Err() != nil {
+		return nil
+	}
+
 	childCtx, cancel := context.WithCancel(ctx)
 
 	status := dockerContainer.State

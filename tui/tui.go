@@ -228,6 +228,33 @@ func NewTui(logger *slog.Logger) *Tui {
 	return tui
 }
 
+// stopTimer stops a timer if it hasn't already fired, preventing resource leaks.
+// Safe to call multiple times on the same timer.
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		if !t.Stop() {
+			// If the timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.C:
+			default:
+			}
+		}
+	}
+}
+
+// stopTicker stops a ticker if it hasn't already fired, preventing resource leaks.
+// Safe to call multiple times on the same ticker.
+func stopTicker(t *time.Ticker) {
+	if t != nil {
+		t.Stop()
+		// Drain the channel to prevent goroutine leak
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
 func (t *Tui) getSortIndicator(isActive bool, isAsc bool) string {
 	if !isActive {
 		return ""
@@ -502,7 +529,13 @@ func (t *Tui) showStatusMessage(message string) {
 	defer t.statusTimerLock.Unlock()
 
 	if t.statusTimer != nil {
-		t.statusTimer.Stop()
+		if !t.statusTimer.Stop() {
+			// Timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.statusTimer.C:
+			default:
+			}
+		}
 	}
 
 	// Clear message after duration
@@ -525,7 +558,13 @@ func (t *Tui) pauseContainerRefresh() {
 	t.containerRefreshTimerLock.Lock()
 	// Cancel previous timer if exists
 	if t.containerRefreshTimer != nil {
-		t.containerRefreshTimer.Stop()
+		if !t.containerRefreshTimer.Stop() {
+			// Timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.containerRefreshTimer.C:
+			default:
+			}
+		}
 	}
 
 	// Resume refresh after duration
@@ -567,7 +606,13 @@ func (t *Tui) pauseProjectRefresh() {
 	t.projectRefreshTimerLock.Lock()
 	// Cancel previous timer if exists
 	if t.projectRefreshTimer != nil {
-		t.projectRefreshTimer.Stop()
+		if !t.projectRefreshTimer.Stop() {
+			// Timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.projectRefreshTimer.C:
+			default:
+			}
+		}
 	}
 
 	// Resume refresh after duration
@@ -585,7 +630,7 @@ func (t *Tui) GetRequestData() <-chan dto.RequestData {
 
 func (t *Tui) getData(ctx context.Context) {
 	ticker := time.NewTicker(refreshInterval)
-	defer ticker.Stop()
+	defer stopTicker(ticker)
 
 	for {
 		select {
@@ -615,7 +660,7 @@ func (t *Tui) refreshProjectList() {
 
 	response := make(chan []dto.Project, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer timer.Stop()
+	defer stopTimer(timer)
 
 	select {
 	case t.requestData <- &dto.RequestProjectList{Response: response}:
@@ -627,9 +672,18 @@ func (t *Tui) refreshProjectList() {
 	select {
 	case projects := <-response:
 		t.tableProjectDataLock.Lock()
-		t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))
+		// Update map in place instead of recreating it to reduce GC pressure
+		// Build a set of active project IDs
+		activeProjects := make(map[dto.ProjectID]struct{}, len(projects))
 		for _, p := range projects {
 			t.tableProjectData[p.ID] = p
+			activeProjects[p.ID] = struct{}{}
+		}
+		// Remove projects that are no longer present
+		for id := range t.tableProjectData {
+			if _, exists := activeProjects[id]; !exists {
+				delete(t.tableProjectData, id)
+			}
 		}
 		t.tableProjectDataLock.Unlock()
 
@@ -649,7 +703,7 @@ func (t *Tui) refreshContainerList() {
 	currentProjectID := t.getCurrentProjectID()
 	response := make(chan []dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer timer.Stop()
+	defer stopTimer(timer)
 
 	select {
 	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: response}:
@@ -707,7 +761,7 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context) {
 	// Log collection is running, check if we have logs now
 	response := make(chan dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer timer.Stop()
+	defer stopTimer(timer)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
@@ -758,7 +812,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 
 	responseProject := make(chan []dto.Container, 1)
 	timer1 := time.NewTimer(channelTimeout)
-	defer timer1.Stop()
+	defer stopTimer(timer1)
 
 	select {
 	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: responseProject}:
@@ -801,7 +855,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 	response := make(chan dto.Container, 1)
 	newContainerID := t.getCurrentContainerID()
 	timer2 := time.NewTimer(channelTimeout)
-	defer timer2.Stop()
+	defer stopTimer(timer2)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(newContainerID), Response: response}:
@@ -832,7 +886,7 @@ func (t *Tui) startLogCollection(ctx context.Context) {
 
 	response := make(chan dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer timer.Stop()
+	defer stopTimer(timer)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
@@ -873,7 +927,7 @@ func (t *Tui) updateLogs(ctx context.Context) {
 
 	response := make(chan dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer timer.Stop()
+	defer stopTimer(timer)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
@@ -949,7 +1003,13 @@ func (t *Tui) cleanup() {
 	// Stop all timers - protected by mutex
 	t.statusTimerLock.Lock()
 	if t.statusTimer != nil {
-		t.statusTimer.Stop()
+		if !t.statusTimer.Stop() {
+			// Timer already fired, drain the channel to prevent goroutine leak
+			select {
+			case <-t.statusTimer.C:
+			default:
+			}
+		}
 	}
 	t.statusTimerLock.Unlock()
 

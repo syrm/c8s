@@ -62,7 +62,7 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
 	response := make(chan bool, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer timer.Stop()
+	defer stopTimer(timer)
 
 	select {
 	case t.requestData <- &dto.RequestSetPendingAction{
