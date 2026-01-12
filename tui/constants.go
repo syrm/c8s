@@ -16,8 +16,12 @@ const (
 // resourceWarningThreshold is the percentage above which a warning is shown.
 const resourceWarningThreshold = 80.0
 
-// defaultShell is the default shell to use when opening a container shell.
+// defaultShell is the fallback shell to use when no preferred shell is available.
 const defaultShell = "/bin/sh"
+
+// preferredShells is a list of shells to try in order of preference.
+// We try bash first as it provides a better user experience.
+var preferredShells = []string{"/bin/bash", "/bin/sh", "/bin/ash"}
 
 // Pending action constants for container operations.
 const (

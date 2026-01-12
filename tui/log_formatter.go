@@ -21,6 +21,78 @@ var timestampFormats = [...]string{
 	"2006-01-02 15:04:05",
 }
 
+// commonLogFormat represents the most common JSON log format fields.
+// Using a struct is more efficient than map[string]any for repeated parsing.
+type commonLogFormat struct {
+	// Timestamp fields (various naming conventions)
+	Time      string `json:"time,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+	Ts        string `json:"ts,omitempty"`
+	AtTime    string `json:"@timestamp,omitempty"`
+	T         string `json:"t,omitempty"`
+
+	// Level fields
+	Level    string `json:"level,omitempty"`
+	Lvl      string `json:"lvl,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	LogLevel string `json:"loglevel,omitempty"`
+
+	// Message fields
+	Msg     string `json:"msg,omitempty"`
+	Message string `json:"message,omitempty"`
+	Text    string `json:"text,omitempty"`
+}
+
+// getTimestamp returns the first non-empty timestamp field.
+func (l *commonLogFormat) getTimestamp() string {
+	switch {
+	case l.Time != "":
+		return l.Time
+	case l.Timestamp != "":
+		return l.Timestamp
+	case l.Ts != "":
+		return l.Ts
+	case l.AtTime != "":
+		return l.AtTime
+	case l.T != "":
+		return l.T
+	default:
+		return ""
+	}
+}
+
+// getLevel returns the first non-empty level field in uppercase.
+func (l *commonLogFormat) getLevel() string {
+	var level string
+	switch {
+	case l.Level != "":
+		level = l.Level
+	case l.Lvl != "":
+		level = l.Lvl
+	case l.Severity != "":
+		level = l.Severity
+	case l.LogLevel != "":
+		level = l.LogLevel
+	default:
+		return ""
+	}
+	return strings.ToUpper(level)
+}
+
+// getMessage returns the first non-empty message field.
+func (l *commonLogFormat) getMessage() string {
+	switch {
+	case l.Msg != "":
+		return l.Msg
+	case l.Message != "":
+		return l.Message
+	case l.Text != "":
+		return l.Text
+	default:
+		return ""
+	}
+}
+
 // formatJSONLog parses a JSON log line and formats it for display.
 // Returns the formatted line and whether parsing was successful.
 func formatJSONLog(line string, showTimestamp bool) (string, bool) {
@@ -32,80 +104,84 @@ func formatJSONLog(line string, showTimestamp bool) (string, bool) {
 	dockerTimestamp := strings.TrimSpace(line[:jsonStart])
 	jsonPart := line[jsonStart:]
 
-	var logData map[string]any
-	if err := json.Unmarshal([]byte(jsonPart), &logData); err != nil {
+	// Try structured parsing first (faster for common formats)
+	var logEntry commonLogFormat
+	if err := json.Unmarshal([]byte(jsonPart), &logEntry); err != nil {
 		return "", false
 	}
 
-	var logTimestamp, level, msg string
+	logTimestamp := logEntry.getTimestamp()
+	level := logEntry.getLevel()
+	msg := logEntry.getMessage()
+
+	// For extra fields, we still need to use map[string]any
+	// but only if the structured fields don't cover everything
 	var extras []string
-
-	// Extract timestamp fields
-	for _, key := range []string{"time", "timestamp", "ts", "@timestamp", "t"} {
-		if v, ok := logData[key]; ok {
-			logTimestamp = fmt.Sprintf("%v", v)
+	var logData map[string]any
+	if err := json.Unmarshal([]byte(jsonPart), &logData); err == nil {
+		// Remove known fields
+		for _, key := range []string{"time", "timestamp", "ts", "@timestamp", "t",
+			"level", "lvl", "severity", "loglevel",
+			"msg", "message", "text"} {
 			delete(logData, key)
-			break
+		}
+
+		// Collect remaining fields sorted by key
+		if len(logData) > 0 {
+			keys := make([]string, 0, len(logData))
+			for k := range logData {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+
+			for _, k := range keys {
+				v := logData[k]
+				vStr := fmt.Sprintf("%v", v)
+				vStr = strings.ReplaceAll(vStr, "[", "[[]")
+				extras = append(extras, fmt.Sprintf("[blue]%s[-]=%s", k, vStr))
+			}
 		}
 	}
 
-	// Extract level fields
-	for _, key := range []string{"level", "lvl", "severity", "loglevel"} {
-		if v, ok := logData[key]; ok {
-			level = strings.ToUpper(fmt.Sprintf("%v", v))
-			delete(logData, key)
-			break
-		}
-	}
-
-	// Extract message fields
-	for _, key := range []string{"msg", "message", "text"} {
-		if v, ok := logData[key]; ok {
-			msg = fmt.Sprintf("%v", v)
-			delete(logData, key)
-			break
-		}
-	}
-
-	// Collect remaining fields sorted by key
-	var keys []string
-	for k := range logData {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		v := logData[k]
-		vStr := fmt.Sprintf("%v", v)
-		vStr = strings.ReplaceAll(vStr, "[", "[[]")
-		extras = append(extras, fmt.Sprintf("[blue]%s[-]=%s", k, vStr))
-	}
-
-	// Build formatted line
-	var parts []string
+	// Build formatted line using strings.Builder for efficiency
+	var builder strings.Builder
 
 	if showTimestamp {
 		if logTimestamp != "" {
 			formattedTs := formatTimestamp(logTimestamp)
-			parts = append(parts, fmt.Sprintf("[gray]%s[-]", formattedTs))
+			builder.WriteString("[gray]")
+			builder.WriteString(formattedTs)
+			builder.WriteString("[-] ")
 		} else if dockerTimestamp != "" {
-			parts = append(parts, fmt.Sprintf("[gray]%s[-]", dockerTimestamp))
+			builder.WriteString("[gray]")
+			builder.WriteString(dockerTimestamp)
+			builder.WriteString("[-] ")
 		}
 	}
 
 	if level != "" {
 		levelColor := getLevelColor(level)
-		parts = append(parts, fmt.Sprintf("[%s]%-5s[-]", levelColor, level))
-	}
-	if msg != "" {
-		msg = strings.ReplaceAll(msg, "[", "[[]")
-		parts = append(parts, msg)
-	}
-	if len(extras) > 0 {
-		parts = append(parts, strings.Join(extras, " "))
+		builder.WriteString("[")
+		builder.WriteString(levelColor)
+		builder.WriteString("]")
+		builder.WriteString(fmt.Sprintf("%-5s", level))
+		builder.WriteString("[-] ")
 	}
 
-	return strings.Join(parts, " ") + "\n", true
+	if msg != "" {
+		msg = strings.ReplaceAll(msg, "[", "[[]")
+		builder.WriteString(msg)
+	}
+
+	if len(extras) > 0 {
+		if builder.Len() > 0 {
+			builder.WriteString(" ")
+		}
+		builder.WriteString(strings.Join(extras, " "))
+	}
+
+	builder.WriteString("\n")
+	return builder.String(), true
 }
 
 // formatTimestamp converts various timestamp formats to RFC3339Nano.

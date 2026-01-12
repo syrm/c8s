@@ -10,10 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/syrm/c8s/dto"
-
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/syrm/c8s/dto"
+	itimer "github.com/syrm/c8s/internal/timer"
 )
 
 
@@ -80,6 +81,10 @@ type Tui struct {
 	actionsCancel     context.CancelFunc
 	actionsCancelLock sync.Mutex
 	actionsWG         sync.WaitGroup
+	// actionsSem limits concurrent container actions to prevent resource exhaustion
+	actionsSem chan struct{}
+	// dataWG tracks the getData goroutine to ensure clean shutdown
+	dataWG sync.WaitGroup
 }
 
 func NewTui(logger *slog.Logger) *Tui {
@@ -201,8 +206,9 @@ func NewTui(logger *slog.Logger) *Tui {
 		containerSortColumn: containerSortCPU,
 	}
 
-	// Initialize actions context for container action goroutines
+	// Initialize actions context and semaphore for container action goroutines
 	tui.actionsCtx, tui.actionsCancel = context.WithCancel(context.Background())
+	tui.actionsSem = make(chan struct{}, maxConcurrentActions)
 
 	// Add pages
 	pages.AddPage("projectList", projectLayout, true, true)
@@ -226,33 +232,6 @@ func NewTui(logger *slog.Logger) *Tui {
 	tui.setupModalCallbacks()
 
 	return tui
-}
-
-// stopTimer stops a timer if it hasn't already fired, preventing resource leaks.
-// Safe to call multiple times on the same timer.
-func stopTimer(t *time.Timer) {
-	if t != nil {
-		if !t.Stop() {
-			// If the timer already fired, drain the channel to prevent goroutine leak
-			select {
-			case <-t.C:
-			default:
-			}
-		}
-	}
-}
-
-// stopTicker stops a ticker if it hasn't already fired, preventing resource leaks.
-// Safe to call multiple times on the same ticker.
-func stopTicker(t *time.Ticker) {
-	if t != nil {
-		t.Stop()
-		// Drain the channel to prevent goroutine leak
-		select {
-		case <-t.C:
-		default:
-		}
-	}
 }
 
 func (t *Tui) getSortIndicator(isActive bool, isAsc bool) string {
@@ -630,7 +609,7 @@ func (t *Tui) GetRequestData() <-chan dto.RequestData {
 
 func (t *Tui) getData(ctx context.Context) {
 	ticker := time.NewTicker(refreshInterval)
-	defer stopTicker(ticker)
+	defer itimer.StopTicker(ticker)
 
 	for {
 		select {
@@ -638,6 +617,11 @@ func (t *Tui) getData(ctx context.Context) {
 			return
 
 		case <-ticker.C:
+			// Check if TUI is closing to exit quickly
+			if t.closing.Load() {
+				return
+			}
+
 			cv := t.getCurrentView()
 			switch cv {
 			case viewProjectList:
@@ -660,7 +644,7 @@ func (t *Tui) refreshProjectList() {
 
 	response := make(chan []dto.Project, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer stopTimer(timer)
+	defer itimer.Stop(timer)
 
 	select {
 	case t.requestData <- &dto.RequestProjectList{Response: response}:
@@ -703,7 +687,7 @@ func (t *Tui) refreshContainerList() {
 	currentProjectID := t.getCurrentProjectID()
 	response := make(chan []dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer stopTimer(timer)
+	defer itimer.Stop(timer)
 
 	select {
 	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: response}:
@@ -761,7 +745,7 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context) {
 	// Log collection is running, check if we have logs now
 	response := make(chan dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer stopTimer(timer)
+	defer itimer.Stop(timer)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
@@ -812,7 +796,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 
 	responseProject := make(chan []dto.Container, 1)
 	timer1 := time.NewTimer(channelTimeout)
-	defer stopTimer(timer1)
+	defer itimer.Stop(timer1)
 
 	select {
 	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: responseProject}:
@@ -855,7 +839,7 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 	response := make(chan dto.Container, 1)
 	newContainerID := t.getCurrentContainerID()
 	timer2 := time.NewTimer(channelTimeout)
-	defer stopTimer(timer2)
+	defer itimer.Stop(timer2)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(newContainerID), Response: response}:
@@ -886,7 +870,7 @@ func (t *Tui) startLogCollection(ctx context.Context) {
 
 	response := make(chan dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer stopTimer(timer)
+	defer itimer.Stop(timer)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
@@ -927,7 +911,7 @@ func (t *Tui) updateLogs(ctx context.Context) {
 
 	response := make(chan dto.Container, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer stopTimer(timer)
+	defer itimer.Stop(timer)
 
 	select {
 	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
@@ -972,10 +956,17 @@ func (t *Tui) updateLogs(ctx context.Context) {
 }
 
 func (t *Tui) Render(ctx context.Context) error {
-	go t.getData(ctx)
+	// Track getData goroutine to ensure clean shutdown
+	t.dataWG.Add(1)
+	go func() {
+		defer t.dataWG.Done()
+		t.getData(ctx)
+	}()
 
 	if err := t.app.SetRoot(t.pages, true).EnableMouse(true).Run(); err != nil {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
+		// Wait for getData to finish before returning
+		t.dataWG.Wait()
 		return err
 	}
 
@@ -999,6 +990,10 @@ func (t *Tui) cleanup() {
 
 	// Wait for all action goroutines to complete
 	t.actionsWG.Wait()
+
+	// CRITICAL: Wait for getData goroutine to finish BEFORE closing the channel
+	// This prevents panic from sending on closed channel
+	t.dataWG.Wait()
 
 	// Stop all timers - protected by mutex
 	t.statusTimerLock.Lock()

@@ -8,6 +8,7 @@ import (
 	"github.com/rivo/tview"
 
 	"github.com/syrm/c8s/dto"
+	itimer "github.com/syrm/c8s/internal/timer"
 )
 
 // setupStylesOnce ensures styles are only configured once.
@@ -329,7 +330,7 @@ func (t *Tui) exitLogView() {
 		timer := time.NewTimer(channelTimeout)
 		select {
 		case t.requestData <- &dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)}:
-			stopTimer(timer)
+			itimer.Stop(timer)
 		case <-timer.C:
 			// Timeout is acceptable here, we're exiting anyway
 		}
@@ -446,7 +447,14 @@ func (t *Tui) getLogPaused() bool {
 }
 
 func (t *Tui) toggleLogPaused() {
-	t.logPaused.Store(!t.logPaused.Load())
+	// Use CompareAndSwap in a loop to ensure atomic toggle
+	// This prevents race conditions where two concurrent toggles could both read the same value
+	for {
+		old := t.logPaused.Load()
+		if t.logPaused.CompareAndSwap(old, !old) {
+			break
+		}
+	}
 }
 
 func (t *Tui) setLogFilter(filter string) {
@@ -462,7 +470,14 @@ func (t *Tui) getLogFilter() string {
 }
 
 func (t *Tui) toggleLogShowTimestamp() {
-	t.logShowTimestamp.Store(!t.logShowTimestamp.Load())
+	// Use CompareAndSwap in a loop to ensure atomic toggle
+	// This prevents race conditions where two concurrent toggles could both read the same value
+	for {
+		old := t.logShowTimestamp.Load()
+		if t.logShowTimestamp.CompareAndSwap(old, !old) {
+			break
+		}
+	}
 }
 
 func (t *Tui) getLogShowTimestamp() bool {

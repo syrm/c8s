@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 
 	apiContainer "github.com/docker/docker/api/types/container"
@@ -10,15 +11,6 @@ import (
 	"github.com/syrm/c8s/dto"
 )
 
-// Container status constants - re-exported from dto for convenience.
-const (
-	StatusRunning    = dto.StatusRunning
-	StatusExited     = dto.StatusExited
-	StatusPaused     = dto.StatusPaused
-	StatusRestarting = dto.StatusRestarting
-	StatusCreated    = dto.StatusCreated
-	StatusRemoving   = dto.StatusRemoving
-)
 
 // Container represents a Docker container with its state and metrics.
 // All access is serialized through the Command channel via handleCommands.
@@ -63,6 +55,23 @@ type ContainerCommand struct {
 	response chan ContainerResponse // Must be buffered to prevent deadlock!
 }
 
+// NewContainerCommand creates a new ContainerCommand with a properly buffered response channel.
+// This ensures thread-safety and prevents potential deadlocks.
+func NewContainerCommand(functor func(*Container)) ContainerCommand {
+	return ContainerCommand{
+		functor:  functor,
+		response: make(chan ContainerResponse, 1), // Always buffered
+	}
+}
+
+// NewContainerCommandNoResponse creates a new ContainerCommand without a response channel.
+// Use this when you don't need to receive a response from the command.
+func NewContainerCommandNoResponse(functor func(*Container)) ContainerCommand {
+	return ContainerCommand{
+		functor: functor,
+	}
+}
+
 // NewContainer creates a new Container from a Docker API container summary.
 // It starts a goroutine to handle commands for this container.
 func NewContainer(
@@ -86,13 +95,14 @@ func NewContainer(
 	// Default to "created" if status is still unknown
 	// (container must exist to receive events)
 	if status == "" {
-		status = StatusCreated
+		status = dto.StatusCreated
 	}
 
 	// Safely get container name
+	// Docker container names are prefixed with "/" which we strip for display
 	containerName := ""
 	if len(dockerContainer.Names) > 0 {
-		containerName = dockerContainer.Names[0]
+		containerName = strings.TrimPrefix(dockerContainer.Names[0], "/")
 	}
 
 	c := &Container{
@@ -187,17 +197,17 @@ func (c *Container) SetPendingAction(action string) {
 func statusFromAction(action events.Action) string {
 	switch action {
 	case events.ActionStart, events.ActionUnPause, events.ActionReload:
-		return StatusRunning
+		return dto.StatusRunning
 	case events.ActionStop, events.ActionDie, events.ActionKill, events.ActionOOM:
-		return StatusExited
+		return dto.StatusExited
 	case events.ActionPause:
-		return StatusPaused
+		return dto.StatusPaused
 	case events.ActionRestart:
-		return StatusRestarting
+		return dto.StatusRestarting
 	case events.ActionCreate:
-		return StatusCreated
+		return dto.StatusCreated
 	case events.ActionRemove, events.ActionDelete, events.ActionDestroy:
-		return StatusRemoving
+		return dto.StatusRemoving
 	default:
 		// Unknown actions (exec_*, health_status, top, rename, etc.)
 		// should not change the container status

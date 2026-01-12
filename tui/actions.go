@@ -9,7 +9,12 @@ import (
 	"time"
 
 	"github.com/syrm/c8s/dto"
+	itimer "github.com/syrm/c8s/internal/timer"
 )
+
+// maxConcurrentActions limits the number of concurrent container actions.
+// This prevents resource exhaustion when users spam action keys.
+const maxConcurrentActions = 10
 
 // containerStatusFilter defines which container statuses are allowed for an action.
 type containerStatusFilter int
@@ -19,6 +24,38 @@ const (
 	filterNotRunning                              // Only non-running containers
 	filterAny                                     // Any status
 )
+
+// isValidContainerID validates that a container ID has the expected Docker format.
+// Docker container IDs are 64 hexadecimal characters.
+func isValidContainerID(id string) bool {
+	// Docker short IDs are at least 12 chars, full IDs are 64 chars
+	if len(id) < 12 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// tryAcquireActionSlot attempts to acquire a slot from the action semaphore.
+// Returns true if acquired, false if the semaphore is full.
+func (t *Tui) tryAcquireActionSlot() bool {
+	select {
+	case t.actionsSem <- struct{}{}:
+		return true
+	default:
+		t.showStatusMessage("Too many pending actions, please wait")
+		return false
+	}
+}
+
+// releaseActionSlot releases a slot back to the action semaphore.
+func (t *Tui) releaseActionSlot() {
+	<-t.actionsSem
+}
 
 // getSelectedContainer returns the container at the selected row, filtered by status.
 func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *dto.Container {
@@ -62,7 +99,7 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
 	response := make(chan bool, 1)
 	timer := time.NewTimer(channelTimeout)
-	defer stopTimer(timer)
+	defer itimer.Stop(timer)
 
 	select {
 	case t.requestData <- &dto.RequestSetPendingAction{
@@ -102,9 +139,18 @@ func (t *Tui) handleContainerShell() bool {
 		return false
 	}
 
+	// Validate container ID to prevent command injection
+	if !isValidContainerID(string(container.ID)) {
+		t.showStatusMessage("Invalid container ID")
+		return false
+	}
+
+	// Find available shell in the container
+	shell := findAvailableShell(string(container.ID))
+
 	var shellErr error
 	t.app.Suspend(func() {
-		cmd := exec.Command("docker", "exec", "-it", string(container.ID), defaultShell)
+		cmd := exec.Command("docker", "exec", "-it", string(container.ID), shell)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -119,11 +165,35 @@ func (t *Tui) handleContainerShell() bool {
 	return true
 }
 
+// findAvailableShell checks which shells are available in the container.
+// Returns the first available shell from preferredShells, or defaultShell as fallback.
+func findAvailableShell(containerID string) string {
+	for _, shell := range preferredShells {
+		// Use 'test -x' to check if the shell exists and is executable
+		cmd := exec.Command("docker", "exec", containerID, "test", "-x", shell)
+		if cmd.Run() == nil {
+			return shell
+		}
+	}
+	return defaultShell
+}
+
 // handleContainerStop stops the selected running container.
 func (t *Tui) handleContainerStop() bool {
 	rowIndex, _ := t.tableContainer.GetSelection()
 	container := t.getSelectedContainer(rowIndex, filterRunning)
 	if container == nil {
+		return false
+	}
+
+	// Validate container ID to prevent command injection
+	if !isValidContainerID(string(container.ID)) {
+		t.showStatusMessage("Invalid container ID")
+		return false
+	}
+
+	// Limit concurrent actions to prevent resource exhaustion
+	if !t.tryAcquireActionSlot() {
 		return false
 	}
 
@@ -135,6 +205,7 @@ func (t *Tui) handleContainerStop() bool {
 	t.actionsWG.Add(1)
 	go func() {
 		defer t.actionsWG.Done()
+		defer t.releaseActionSlot()
 
 		// Use the shared actions context with timeout to prevent hanging
 		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
@@ -164,6 +235,17 @@ func (t *Tui) handleContainerRestart() bool {
 		return false
 	}
 
+	// Validate container ID to prevent command injection
+	if !isValidContainerID(string(container.ID)) {
+		t.showStatusMessage("Invalid container ID")
+		return false
+	}
+
+	// Limit concurrent actions to prevent resource exhaustion
+	if !t.tryAcquireActionSlot() {
+		return false
+	}
+
 	var action string
 	if container.Status == dto.StatusRunning {
 		action = actionRestarting
@@ -179,6 +261,7 @@ func (t *Tui) handleContainerRestart() bool {
 	t.actionsWG.Add(1)
 	go func() {
 		defer t.actionsWG.Done()
+		defer t.releaseActionSlot()
 
 		// Use the shared actions context with timeout to prevent hanging
 		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
@@ -214,6 +297,17 @@ func (t *Tui) handleContainerRemove() bool {
 		return false
 	}
 
+	// Validate container ID to prevent command injection
+	if !isValidContainerID(string(container.ID)) {
+		t.showStatusMessage("Invalid container ID")
+		return false
+	}
+
+	// Limit concurrent actions to prevent resource exhaustion
+	if !t.tryAcquireActionSlot() {
+		return false
+	}
+
 	t.setPendingAction(container.ID, actionRemoving)
 	t.updateLocalCache(container.ID, actionRemoving)
 	t.drawContainers()
@@ -222,6 +316,7 @@ func (t *Tui) handleContainerRemove() bool {
 	t.actionsWG.Add(1)
 	go func() {
 		defer t.actionsWG.Done()
+		defer t.releaseActionSlot()
 
 		// Use the shared actions context with timeout to prevent hanging
 		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
