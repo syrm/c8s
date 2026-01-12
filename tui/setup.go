@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +18,6 @@ var setupStylesOnce sync.Once
 // setupStyles configures tview global styles (k9s-like appearance).
 func setupStyles() {
 	setupStylesOnce.Do(func() {
-		// K9s-style borders
 		tview.Borders.HorizontalFocus = tview.BoxDrawingsLightHorizontal
 		tview.Borders.VerticalFocus = tview.BoxDrawingsLightVertical
 		tview.Borders.TopLeftFocus = tview.BoxDrawingsLightDownAndRight
@@ -25,7 +25,6 @@ func setupStyles() {
 		tview.Borders.BottomLeftFocus = tview.BoxDrawingsLightUpAndRight
 		tview.Borders.BottomRightFocus = tview.BoxDrawingsLightUpAndLeft
 
-		// K9s color scheme
 		tview.Styles.PrimitiveBackgroundColor = tcell.ColorBlack
 		tview.Styles.ContrastBackgroundColor = tcell.ColorBlack
 		tview.Styles.MoreContrastBackgroundColor = tcell.ColorBlack
@@ -61,12 +60,26 @@ func createTable() *tview.Table {
 	return table
 }
 
+// createStatusBarView creates the status bar text view.
+func createStatusBarView() *tview.TextView {
+	statusBar := tview.NewTextView()
+	statusBar.SetDynamicColors(true)
+	statusBar.SetTextAlign(tview.AlignCenter)
+	statusBar.SetBackgroundColor(tcell.ColorBlack)
+	statusBar.SetTextColor(tcell.ColorWhite)
+	return statusBar
+}
+
+// escapeColorTags escapes brackets to prevent tview from interpreting them as color tags.
+func escapeColorTags(s string) string {
+	return strings.ReplaceAll(s, "[", "[[]")
+}
+
 // setupProjectTableHandler sets up keyboard handlers for the project table.
 func (t *Tui) setupProjectTableHandler() {
-	t.tableProject.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+	t.projectView.Table.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		r := event.Rune()
 
-		// Sort by column
 		switch r {
 		case 'N':
 			t.setProjectSort(projectSortName)
@@ -83,14 +96,14 @@ func (t *Tui) setupProjectTableHandler() {
 		}
 
 		if r == '/' {
-			t.projectSearchInput.SetText(t.getProjectSearchQuery())
-			t.projectLayout.AddItem(t.projectSearchInput, 1, 0, true)
-			t.app.SetFocus(t.projectSearchInput)
+			t.projectView.Search.Input.SetText(t.projectView.Search.Query())
+			t.projectView.Layout.AddItem(t.projectView.Search.Input, 1, 0, true)
+			t.app.SetFocus(t.projectView.Search.Input)
 			return nil
 		}
 
-		if r == 'c' && t.getProjectSearchQuery() != "" {
-			t.setProjectSearchQuery("")
+		if r == 'c' && t.projectView.Search.Query() != "" {
+			t.projectView.Search.SetQuery("")
 			t.drawProjects()
 			return nil
 		}
@@ -106,7 +119,7 @@ func (t *Tui) setupProjectTableHandler() {
 		}
 
 		if event.Key() == tcell.KeyUp || event.Key() == tcell.KeyDown {
-			t.pauseProjectRefresh()
+			t.projectRefresh.Pause(refreshPauseDuration, t.closing.Load)
 			t.updateHeader()
 		}
 
@@ -116,51 +129,48 @@ func (t *Tui) setupProjectTableHandler() {
 
 // enterContainerView handles navigation from project list to container list.
 func (t *Tui) enterContainerView() {
-	rowIndex, _ := t.tableProject.GetSelection()
-	// Validate row index: must be > 0 (skip header)
+	rowIndex, _ := t.projectView.Table.GetSelection()
 	if rowIndex <= 0 {
 		return
 	}
-	cell := t.tableProject.GetCell(rowIndex, 0)
+	cell := t.projectView.Table.GetCell(rowIndex, 0)
 	if cell == nil || cell.Text == "" {
 		return
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
+	projects := t.projectView.Data.Values()
 	var found bool
-	t.tableProjectDataLock.RLock()
-	for _, project := range t.tableProjectData {
+	for _, project := range projects {
 		if cellText == project.Name {
-			t.setCurrentProjectID(string(project.ID))
-			t.setCurrentProjectName(project.Name)
-			t.setCurrentView(viewProject)
+			t.nav.SetProjectID(string(project.ID))
+			t.nav.SetProjectName(project.Name)
+			t.nav.SetView(viewProject)
 			found = true
 			break
 		}
 	}
-	t.tableProjectDataLock.RUnlock()
 
 	if !found {
 		return
 	}
 
-	t.setContainerSearchQuery("")
-	t.containerSearchInput.SetText("")
-	t.tableContainer.Clear()
+	t.containerView.Search.SetQuery("")
+	t.containerView.Search.Input.SetText("")
+	t.containerView.Table.Clear()
 	t.drawContainers()
 	t.pages.SwitchToPage("containerList")
 
-	t.setProjectRefreshPaused(false)
-	t.stopProjectRefreshTimer()
+	t.projectRefresh.SetPaused(false)
+	t.projectRefresh.Stop()
 	t.updateHeader()
 }
 
 // setupContainerTableHandler sets up keyboard handlers for the container table.
 func (t *Tui) setupContainerTableHandler() {
-	t.tableContainer.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+	t.containerView.Table.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		r := event.Rune()
 
-		// Sort by column
 		switch r {
 		case 'N':
 			t.setContainerSort(containerSortName)
@@ -177,14 +187,14 @@ func (t *Tui) setupContainerTableHandler() {
 		}
 
 		if r == '/' {
-			t.containerSearchInput.SetText(t.getContainerSearchQuery())
-			t.containerLayout.AddItem(t.containerSearchInput, 1, 0, true)
-			t.app.SetFocus(t.containerSearchInput)
+			t.containerView.Search.Input.SetText(t.containerView.Search.Query())
+			t.containerView.Layout.AddItem(t.containerView.Search.Input, 1, 0, true)
+			t.app.SetFocus(t.containerView.Search.Input)
 			return nil
 		}
 
-		if r == 'c' && t.getContainerSearchQuery() != "" {
-			t.setContainerSearchQuery("")
+		if r == 'c' && t.containerView.Search.Query() != "" {
+			t.containerView.Search.SetQuery("")
 			t.drawContainers()
 			return nil
 		}
@@ -224,7 +234,7 @@ func (t *Tui) setupContainerTableHandler() {
 		}
 
 		if event.Key() == tcell.KeyUp || event.Key() == tcell.KeyDown {
-			t.pauseContainerRefresh()
+			t.containerRefresh.Pause(refreshPauseDuration, t.closing.Load)
 			t.updateHeader()
 		}
 
@@ -235,38 +245,36 @@ func (t *Tui) setupContainerTableHandler() {
 // exitContainerView handles navigation from container list back to project list.
 func (t *Tui) exitContainerView() {
 	t.pages.SwitchToPage("projectList")
-	t.setCurrentView(viewProjectList)
-	t.setCurrentContainerID("")
-	t.setContainerSearchQuery("")
-	t.containerSearchInput.SetText("")
-	t.setContainerRefreshPaused(false)
-	t.stopContainerRefreshTimer()
+	t.nav.SetView(viewProjectList)
+	t.nav.SetContainerID("")
+	t.containerView.Search.SetQuery("")
+	t.containerView.Search.Input.SetText("")
+	t.containerRefresh.SetPaused(false)
+	t.containerRefresh.Stop()
 	t.updateHeader()
 }
 
 // enterLogView handles navigation from container list to log view.
 func (t *Tui) enterLogView() {
-	rowIndex, _ := t.tableContainer.GetSelection()
-	// Validate row index: must be > 0 (skip header)
+	rowIndex, _ := t.containerView.Table.GetSelection()
 	if rowIndex <= 0 {
 		return
 	}
-	cell := t.tableContainer.GetCell(rowIndex, 0)
+	cell := t.containerView.Table.GetCell(rowIndex, 0)
 	if cell == nil || cell.Text == "" {
 		return
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
+	containers := t.containerView.Data.Values()
 	var found bool
-	t.tableContainerDataLock.RLock()
-	for _, container := range t.tableContainerData {
+	for _, container := range containers {
 		if cellText == container.Service {
-			t.setCurrentContainerInfo(string(container.ID), container.Name, container.Service)
+			t.nav.SetContainerInfo(string(container.ID), container.Name, container.Service)
 			found = true
 			break
 		}
 	}
-	t.tableContainerDataLock.RUnlock()
 
 	if !found {
 		return
@@ -274,40 +282,40 @@ func (t *Tui) enterLogView() {
 
 	t.drawContainerLog()
 	t.pages.SwitchToPage("logs")
-	t.setCurrentView(viewContainerLog)
+	t.nav.SetView(viewContainerLog)
 	t.updateHeader()
 }
 
 // setupLogViewHandler sets up keyboard handlers for the log view.
 func (t *Tui) setupLogViewHandler() {
-	t.tableContainerLog.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+	t.logView.View.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEsc || event.Key() == tcell.KeyLeft {
 			t.exitLogView()
 		}
 
 		if event.Rune() == 'p' {
-			t.toggleLogPaused()
+			t.logView.TogglePaused()
 			t.drawContainerLog()
 			t.updateHeader()
 		}
 
 		if event.Rune() == '/' {
-			t.logLayout.AddItem(t.logFilterInput, 1, 0, true)
-			t.app.SetFocus(t.logFilterInput)
+			t.logView.Layout.AddItem(t.logView.FilterInput, 1, 0, true)
+			t.app.SetFocus(t.logView.FilterInput)
 		}
 
 		if event.Rune() == 'c' {
-			if t.getLogFilter() != "" {
-				t.setLogFilter("")
-				t.logFilterInput.SetText("")
-				t.logLayout.RemoveItem(t.logFilterInput)
+			if t.logView.Filter.Get() != "" {
+				t.logView.Filter.Set("")
+				t.logView.FilterInput.SetText("")
+				t.logView.Layout.RemoveItem(t.logView.FilterInput)
 				t.drawContainerLog()
 				t.updateHeader()
 			}
 		}
 
 		if event.Rune() == 't' {
-			t.toggleLogShowTimestamp()
+			t.logView.ToggleTimestamp()
 			t.drawContainerLog()
 			t.updateHeader()
 		}
@@ -324,73 +332,71 @@ func (t *Tui) setupLogViewHandler() {
 
 // exitLogView handles navigation from log view back to container list.
 func (t *Tui) exitLogView() {
-	// Stop log collection for the current container
-	currentContainerID := t.getCurrentContainerID()
+	currentContainerID := t.nav.ContainerID()
 	if currentContainerID != "" {
 		timer := time.NewTimer(channelTimeout)
 		select {
 		case t.requestData <- &dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)}:
 			itimer.Stop(timer)
 		case <-timer.C:
-			// Timeout is acceptable here, we're exiting anyway
 		}
 	}
 
-	t.tableContainer.Clear()
+	t.containerView.Table.Clear()
 	t.drawContainers()
 	t.pages.SwitchToPage("containerList")
-	t.setCurrentView(viewProject)
-	t.setCurrentContainerID("")
-	t.setLogPaused(false)
-	t.setLogFilter("")
-	t.logFilterInput.SetText("")
-	t.logLayout.RemoveItem(t.logFilterInput)
-	t.clearTableContainerLogData()
-	t.setContainerDisappeared(false)
+	t.nav.SetView(viewProject)
+	t.nav.SetContainerID("")
+	t.logView.Paused.Store(false)
+	t.logView.Filter.Set("")
+	t.logView.FilterInput.SetText("")
+	t.logView.Layout.RemoveItem(t.logView.FilterInput)
+	t.logView.Data.Clear()
+	t.logView.Disappeared.Store(false)
 	t.updateHeader()
 }
 
 // setupSearchCallbacks sets up callbacks for search inputs.
 func (t *Tui) setupSearchCallbacks() {
-	t.projectSearchInput.SetChangedFunc(func(text string) {
-		t.setProjectSearchQuery(text)
+	t.projectView.Search.Input.SetChangedFunc(func(text string) {
+		t.projectView.Search.SetQuery(text)
 		t.drawProjects()
 	})
 
-	t.projectSearchInput.SetDoneFunc(func(key tcell.Key) {
-		t.projectLayout.RemoveItem(t.projectSearchInput)
-		t.app.SetFocus(t.tableProject)
+	t.projectView.Search.Input.SetDoneFunc(func(key tcell.Key) {
+		t.projectView.Layout.RemoveItem(t.projectView.Search.Input)
+		t.app.SetFocus(t.projectView.Table)
 		if key == tcell.KeyEsc {
-			t.setProjectSearchQuery("")
-			t.projectSearchInput.SetText("")
+			t.projectView.Search.SetQuery("")
+			t.projectView.Search.Input.SetText("")
 		}
 		t.drawProjects()
 	})
 
-	t.containerSearchInput.SetChangedFunc(func(text string) {
-		t.setContainerSearchQuery(text)
+	t.containerView.Search.Input.SetChangedFunc(func(text string) {
+		t.containerView.Search.SetQuery(text)
 		t.drawContainers()
 	})
 
-	t.containerSearchInput.SetDoneFunc(func(key tcell.Key) {
-		t.containerLayout.RemoveItem(t.containerSearchInput)
-		t.app.SetFocus(t.tableContainer)
+	t.containerView.Search.Input.SetDoneFunc(func(key tcell.Key) {
+		t.containerView.Layout.RemoveItem(t.containerView.Search.Input)
+		t.app.SetFocus(t.containerView.Table)
 		if key == tcell.KeyEsc {
-			t.setContainerSearchQuery("")
-			t.containerSearchInput.SetText("")
+			t.containerView.Search.SetQuery("")
+			t.containerView.Search.Input.SetText("")
 		}
 		t.drawContainers()
 	})
 
-	t.logFilterInput.SetDoneFunc(func(key tcell.Key) {
+	t.logView.FilterInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
-			t.setLogFilter(t.logFilterInput.GetText())
+			t.logView.Filter.Set(t.logView.FilterInput.GetText())
 		} else {
-			t.setLogFilter("")
-			t.logFilterInput.SetText("")
+			t.logView.Filter.Set("")
+			t.logView.FilterInput.SetText("")
 		}
-		t.logLayout.RemoveItem(t.logFilterInput)
-		t.app.SetFocus(t.tableContainerLog)
+		t.logView.Layout.RemoveItem(t.logView.FilterInput)
+		t.app.SetFocus(t.logView.View)
 		t.drawContainerLog()
 		t.updateHeader()
 	})
@@ -398,20 +404,20 @@ func (t *Tui) setupSearchCallbacks() {
 
 // setupModalCallbacks sets up callbacks for modals.
 func (t *Tui) setupModalCallbacks() {
-	t.containerDisappearedModal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-		t.setContainerDisappeared(false)
+	t.disappearedModal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+		t.logView.Disappeared.Store(false)
 
 		t.pages.HidePage("modal")
-		t.tableContainer.Clear()
+		t.containerView.Table.Clear()
 		t.drawContainers()
 		t.pages.SwitchToPage("containerList")
-		t.setCurrentView(viewProject)
-		t.clearCurrentContainerInfo()
-		t.setLogPaused(false)
-		t.setLogFilter("")
-		t.logFilterInput.SetText("")
-		t.logLayout.RemoveItem(t.logFilterInput)
-		t.clearTableContainerLogData()
+		t.nav.SetView(viewProject)
+		t.nav.ClearContainerInfo()
+		t.logView.Paused.Store(false)
+		t.logView.Filter.Set("")
+		t.logView.FilterInput.SetText("")
+		t.logView.Layout.RemoveItem(t.logView.FilterInput)
+		t.logView.Data.Clear()
 		t.updateHeader()
 	})
 
@@ -422,277 +428,4 @@ func (t *Tui) setupModalCallbacks() {
 		}
 		return event
 	})
-}
-
-// Thread-safe helper methods for state management
-
-func (t *Tui) setCurrentView(view currentView) {
-	t.currentViewLock.Lock()
-	defer t.currentViewLock.Unlock()
-	t.currentView = view
-}
-
-func (t *Tui) getCurrentView() currentView {
-	t.currentViewLock.RLock()
-	defer t.currentViewLock.RUnlock()
-	return t.currentView
-}
-
-func (t *Tui) setLogPaused(paused bool) {
-	t.logPaused.Store(paused)
-}
-
-func (t *Tui) getLogPaused() bool {
-	return t.logPaused.Load()
-}
-
-func (t *Tui) toggleLogPaused() {
-	// Use CompareAndSwap in a loop to ensure atomic toggle
-	// This prevents race conditions where two concurrent toggles could both read the same value
-	for {
-		old := t.logPaused.Load()
-		if t.logPaused.CompareAndSwap(old, !old) {
-			break
-		}
-	}
-}
-
-func (t *Tui) setLogFilter(filter string) {
-	t.logFilterLock.Lock()
-	defer t.logFilterLock.Unlock()
-	t.logFilter = filter
-}
-
-func (t *Tui) getLogFilter() string {
-	t.logFilterLock.RLock()
-	defer t.logFilterLock.RUnlock()
-	return t.logFilter
-}
-
-func (t *Tui) toggleLogShowTimestamp() {
-	// Use CompareAndSwap in a loop to ensure atomic toggle
-	// This prevents race conditions where two concurrent toggles could both read the same value
-	for {
-		old := t.logShowTimestamp.Load()
-		if t.logShowTimestamp.CompareAndSwap(old, !old) {
-			break
-		}
-	}
-}
-
-func (t *Tui) getLogShowTimestamp() bool {
-	return t.logShowTimestamp.Load()
-}
-
-func (t *Tui) setContainerDisappeared(disappeared bool) {
-	t.containerDisappeared.Store(disappeared)
-}
-
-func (t *Tui) getContainerDisappeared() bool {
-	return t.containerDisappeared.Load()
-}
-
-func (t *Tui) setContainerRefreshPaused(paused bool) {
-	t.containerRefreshPaused.Store(paused)
-}
-
-func (t *Tui) getContainerRefreshPaused() bool {
-	return t.containerRefreshPaused.Load()
-}
-
-func (t *Tui) stopContainerRefreshTimer() {
-	t.containerRefreshTimerLock.Lock()
-	defer t.containerRefreshTimerLock.Unlock()
-	if t.containerRefreshTimer != nil {
-		if !t.containerRefreshTimer.Stop() {
-			// Timer already fired, drain the channel to prevent goroutine leak
-			select {
-			case <-t.containerRefreshTimer.C:
-			default:
-			}
-		}
-		t.containerRefreshTimer = nil
-	}
-}
-
-func (t *Tui) setProjectRefreshPaused(paused bool) {
-	t.projectRefreshPaused.Store(paused)
-}
-
-func (t *Tui) getProjectRefreshPaused() bool {
-	return t.projectRefreshPaused.Load()
-}
-
-func (t *Tui) stopProjectRefreshTimer() {
-	t.projectRefreshTimerLock.Lock()
-	defer t.projectRefreshTimerLock.Unlock()
-	if t.projectRefreshTimer != nil {
-		if !t.projectRefreshTimer.Stop() {
-			// Timer already fired, drain the channel to prevent goroutine leak
-			select {
-			case <-t.projectRefreshTimer.C:
-			default:
-			}
-		}
-		t.projectRefreshTimer = nil
-	}
-}
-
-// Thread-safe helpers for current container/project state
-
-func (t *Tui) getCurrentProjectID() string {
-	t.currentContainerLock.RLock()
-	defer t.currentContainerLock.RUnlock()
-	return t.currentProjectID
-}
-
-func (t *Tui) setCurrentProjectID(id string) {
-	t.currentContainerLock.Lock()
-	defer t.currentContainerLock.Unlock()
-	t.currentProjectID = id
-}
-
-func (t *Tui) getCurrentContainerID() string {
-	t.currentContainerLock.RLock()
-	defer t.currentContainerLock.RUnlock()
-	return t.currentContainerID
-}
-
-func (t *Tui) setCurrentContainerID(id string) {
-	t.currentContainerLock.Lock()
-	defer t.currentContainerLock.Unlock()
-	t.currentContainerID = id
-}
-
-func (t *Tui) getCurrentContainerName() string {
-	t.currentContainerLock.RLock()
-	defer t.currentContainerLock.RUnlock()
-	return t.currentContainerName
-}
-
-func (t *Tui) setCurrentContainerName(name string) {
-	t.currentContainerLock.Lock()
-	defer t.currentContainerLock.Unlock()
-	t.currentContainerName = name
-}
-
-func (t *Tui) getCurrentContainerService() string {
-	t.currentContainerLock.RLock()
-	defer t.currentContainerLock.RUnlock()
-	return t.currentContainerService
-}
-
-func (t *Tui) setCurrentContainerService(service string) {
-	t.currentContainerLock.Lock()
-	defer t.currentContainerLock.Unlock()
-	t.currentContainerService = service
-}
-
-func (t *Tui) setCurrentContainerInfo(id, name, service string) {
-	t.currentContainerLock.Lock()
-	defer t.currentContainerLock.Unlock()
-	t.currentContainerID = id
-	t.currentContainerName = name
-	t.currentContainerService = service
-}
-
-func (t *Tui) clearCurrentContainerInfo() {
-	t.currentContainerLock.Lock()
-	defer t.currentContainerLock.Unlock()
-	t.currentContainerID = ""
-	t.currentContainerName = ""
-	t.currentContainerService = ""
-}
-
-// Thread-safe helpers for tableContainerLogData
-
-func (t *Tui) getTableContainerLogData() []string {
-	t.tableContainerLogDataLock.RLock()
-	defer t.tableContainerLogDataLock.RUnlock()
-	// Return a copy to avoid race conditions
-	result := make([]string, len(t.tableContainerLogData))
-	copy(result, t.tableContainerLogData)
-	return result
-}
-
-func (t *Tui) setTableContainerLogData(data []string) {
-	t.tableContainerLogDataLock.Lock()
-	defer t.tableContainerLogDataLock.Unlock()
-	// Copy data to avoid race conditions if caller modifies original slice
-	t.tableContainerLogData = make([]string, len(data))
-	copy(t.tableContainerLogData, data)
-}
-
-func (t *Tui) clearTableContainerLogData() {
-	t.tableContainerLogDataLock.Lock()
-	defer t.tableContainerLogDataLock.Unlock()
-	t.tableContainerLogData = nil
-}
-
-// Thread-safe helpers for search queries
-
-func (t *Tui) getProjectSearchQuery() string {
-	t.projectSearchQueryLock.RLock()
-	defer t.projectSearchQueryLock.RUnlock()
-	return t.projectSearchQuery
-}
-
-func (t *Tui) setProjectSearchQuery(query string) {
-	t.projectSearchQueryLock.Lock()
-	defer t.projectSearchQueryLock.Unlock()
-	t.projectSearchQuery = query
-}
-
-func (t *Tui) getContainerSearchQuery() string {
-	t.containerSearchQueryLock.RLock()
-	defer t.containerSearchQueryLock.RUnlock()
-	return t.containerSearchQuery
-}
-
-func (t *Tui) setContainerSearchQuery(query string) {
-	t.containerSearchQueryLock.Lock()
-	defer t.containerSearchQueryLock.Unlock()
-	t.containerSearchQuery = query
-}
-
-// Thread-safe helpers for sort state
-
-func (t *Tui) getProjectSort() (projectSortColumn, bool) {
-	t.projectSortLock.RLock()
-	defer t.projectSortLock.RUnlock()
-	return t.projectSortColumn, t.projectSortAsc
-}
-
-func (t *Tui) setProjectSortState(col projectSortColumn, asc bool) {
-	t.projectSortLock.Lock()
-	defer t.projectSortLock.Unlock()
-	t.projectSortColumn = col
-	t.projectSortAsc = asc
-}
-
-func (t *Tui) getContainerSort() (containerSortColumn, bool) {
-	t.containerSortLock.RLock()
-	defer t.containerSortLock.RUnlock()
-	return t.containerSortColumn, t.containerSortAsc
-}
-
-func (t *Tui) setContainerSortState(col containerSortColumn, asc bool) {
-	t.containerSortLock.Lock()
-	defer t.containerSortLock.Unlock()
-	t.containerSortColumn = col
-	t.containerSortAsc = asc
-}
-
-// Thread-safe helper for currentProjectName (uses currentContainerLock)
-
-func (t *Tui) getCurrentProjectName() string {
-	t.currentContainerLock.RLock()
-	defer t.currentContainerLock.RUnlock()
-	return t.currentProjectName
-}
-
-func (t *Tui) setCurrentProjectName(name string) {
-	t.currentContainerLock.Lock()
-	defer t.currentContainerLock.Unlock()
-	t.currentProjectName = name
 }

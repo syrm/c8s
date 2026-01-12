@@ -13,6 +13,9 @@ const (
 	statusMessageDuration = 5 * time.Second
 )
 
+// maxConcurrentActions limits the number of concurrent container actions.
+const maxConcurrentActions = 10
+
 // resourceWarningThreshold is the percentage above which a warning is shown.
 const resourceWarningThreshold = 80.0
 

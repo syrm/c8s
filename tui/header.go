@@ -8,15 +8,12 @@ import (
 
 // getProjectName returns the name of the current project, or "unknown" if not found.
 func (t *Tui) getProjectName() string {
-	currentProjectID := t.getCurrentProjectID()
+	currentProjectID := t.nav.ProjectID()
 	if currentProjectID == "" {
 		return "unknown"
 	}
 
-	t.tableProjectDataLock.RLock()
-	defer t.tableProjectDataLock.RUnlock()
-
-	if project, ok := t.tableProjectData[dto.ProjectID(currentProjectID)]; ok {
+	if project, ok := t.projectView.Data.Get(dto.ProjectID(currentProjectID)); ok {
 		return project.Name
 	}
 	return "unknown"
@@ -24,9 +21,7 @@ func (t *Tui) getProjectName() string {
 
 // updateHeader updates the header text based on the current view.
 func (t *Tui) updateHeader() {
-	t.currentViewLock.RLock()
-	cv := t.currentView
-	t.currentViewLock.RUnlock()
+	cv := t.nav.View()
 
 	var text string
 	switch cv {
@@ -40,23 +35,20 @@ func (t *Tui) updateHeader() {
 		text = " [white::b]c8s[-::]"
 	}
 
-	t.headerView.SetText(text)
+	t.header.SetText(text)
 }
 
 // buildProjectListHeader builds the header for the project list view.
 func (t *Tui) buildProjectListHeader() string {
-	t.tableProjectDataLock.RLock()
-	count := len(t.tableProjectData)
-	t.tableProjectDataLock.RUnlock()
+	count := t.projectView.Data.Len()
 
 	filter := ""
-	projectSearchQuery := t.getProjectSearchQuery()
-	if projectSearchQuery != "" {
-		filter = fmt.Sprintf(" [white](filter: %s)[-]", projectSearchQuery)
+	if q := t.projectView.Search.Query(); q != "" {
+		filter = fmt.Sprintf(" [white](filter: %s)[-]", q)
 	}
 
 	paused := ""
-	if t.getProjectRefreshPaused() {
+	if t.projectRefresh.IsPaused() {
 		paused = " [fuchsia]PAUSED[-]"
 	}
 
@@ -65,20 +57,16 @@ func (t *Tui) buildProjectListHeader() string {
 
 // buildContainerListHeader builds the header for the container list view.
 func (t *Tui) buildContainerListHeader() string {
-	t.tableContainerDataLock.RLock()
-	count := len(t.tableContainerData)
-	t.tableContainerDataLock.RUnlock()
-
+	count := t.containerView.Data.Len()
 	projectName := t.getProjectName()
 
 	filter := ""
-	containerSearchQuery := t.getContainerSearchQuery()
-	if containerSearchQuery != "" {
-		filter = fmt.Sprintf(" [white](filter: %s)[-]", containerSearchQuery)
+	if q := t.containerView.Search.Query(); q != "" {
+		filter = fmt.Sprintf(" [white](filter: %s)[-]", q)
 	}
 
 	paused := ""
-	if t.getContainerRefreshPaused() {
+	if t.containerRefresh.IsPaused() {
 		paused = " [fuchsia]PAUSED[-]"
 	}
 
@@ -90,22 +78,20 @@ func (t *Tui) buildContainerListHeader() string {
 func (t *Tui) buildLogViewHeader() string {
 	status := ""
 
-	if t.getLogPaused() {
+	if t.logView.Paused.Load() {
 		status += " [fuchsia]PAUSED[-]"
 	}
 
-	t.logFilterLock.RLock()
-	if t.logFilter != "" {
-		status += fmt.Sprintf(" [white](filter: %s)[-]", t.logFilter)
+	if f := t.logView.Filter.Get(); f != "" {
+		status += fmt.Sprintf(" [white](filter: %s)[-]", f)
 	}
-	t.logFilterLock.RUnlock()
 
-	if t.getLogShowTimestamp() {
+	if t.logView.ShowTimestamp.Load() {
 		status += " [white](time)[-]"
 	}
 
 	projectName := t.getProjectName()
-	containerService := t.getCurrentContainerService()
+	containerService := t.nav.ContainerService()
 
 	return fmt.Sprintf(" [white::b]c8s[-::] [white]|[-] [white]Logs[-] [white]%s[-] [white](%s)[-]%s",
 		containerService, projectName, status)

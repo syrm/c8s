@@ -12,10 +12,6 @@ import (
 	itimer "github.com/syrm/c8s/internal/timer"
 )
 
-// maxConcurrentActions limits the number of concurrent container actions.
-// This prevents resource exhaustion when users spam action keys.
-const maxConcurrentActions = 10
-
 // containerStatusFilter defines which container statuses are allowed for an action.
 type containerStatusFilter int
 
@@ -26,9 +22,7 @@ const (
 )
 
 // isValidContainerID validates that a container ID has the expected Docker format.
-// Docker container IDs are 64 hexadecimal characters.
 func isValidContainerID(id string) bool {
-	// Docker short IDs are at least 12 chars, full IDs are 64 chars
 	if len(id) < 12 || len(id) > 64 {
 		return false
 	}
@@ -40,44 +34,24 @@ func isValidContainerID(id string) bool {
 	return true
 }
 
-// tryAcquireActionSlot attempts to acquire a slot from the action semaphore.
-// Returns true if acquired, false if the semaphore is full.
-func (t *Tui) tryAcquireActionSlot() bool {
-	select {
-	case t.actionsSem <- struct{}{}:
-		return true
-	default:
-		t.showStatusMessage("Too many pending actions, please wait")
-		return false
-	}
-}
-
-// releaseActionSlot releases a slot back to the action semaphore.
-func (t *Tui) releaseActionSlot() {
-	<-t.actionsSem
-}
-
 // getSelectedContainer returns the container at the selected row, filtered by status.
 func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *dto.Container {
 	if rowIndex <= 0 {
 		return nil
 	}
 
-	cell := t.tableContainer.GetCell(rowIndex, 0)
+	cell := t.containerView.Table.GetCell(rowIndex, 0)
 	if cell == nil {
 		return nil
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
-	t.tableContainerDataLock.RLock()
-	defer t.tableContainerDataLock.RUnlock()
-
-	for _, container := range t.tableContainerData {
+	containers := t.containerView.Data.Values()
+	for _, container := range containers {
 		if cellText != container.Service {
 			continue
 		}
 
-		// Apply status filter
 		switch filter {
 		case filterRunning:
 			if container.Status != dto.StatusRunning {
@@ -118,34 +92,26 @@ func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
 }
 
 // updateLocalCache updates the local container cache with a pending action.
-// This is an optimization to avoid waiting for the next refresh cycle.
 func (t *Tui) updateLocalCache(containerID dto.ContainerID, action string) {
-	t.tableContainerDataLock.Lock()
-	defer t.tableContainerDataLock.Unlock()
-
-	if c, ok := t.tableContainerData[containerID]; ok {
-		// Create a copy with the updated pending action
-		// This is necessary because dto.Container is a value type in the map
+	if c, ok := t.containerView.Data.Get(containerID); ok {
 		c.PendingAction = action
-		t.tableContainerData[containerID] = c
+		t.containerView.Data.Set(containerID, c)
 	}
 }
 
 // handleContainerShell opens an interactive shell in the selected container.
 func (t *Tui) handleContainerShell() bool {
-	rowIndex, _ := t.tableContainer.GetSelection()
+	rowIndex, _ := t.containerView.Table.GetSelection()
 	container := t.getSelectedContainer(rowIndex, filterRunning)
 	if container == nil {
 		return false
 	}
 
-	// Validate container ID to prevent command injection
 	if !isValidContainerID(string(container.ID)) {
 		t.showStatusMessage("Invalid container ID")
 		return false
 	}
 
-	// Find available shell in the container
 	shell := findAvailableShell(string(container.ID))
 
 	var shellErr error
@@ -166,10 +132,8 @@ func (t *Tui) handleContainerShell() bool {
 }
 
 // findAvailableShell checks which shells are available in the container.
-// Returns the first available shell from preferredShells, or defaultShell as fallback.
 func findAvailableShell(containerID string) string {
 	for _, shell := range preferredShells {
-		// Use 'test -x' to check if the shell exists and is executable
 		cmd := exec.Command("docker", "exec", containerID, "test", "-x", shell)
 		if cmd.Run() == nil {
 			return shell
@@ -180,20 +144,19 @@ func findAvailableShell(containerID string) string {
 
 // handleContainerStop stops the selected running container.
 func (t *Tui) handleContainerStop() bool {
-	rowIndex, _ := t.tableContainer.GetSelection()
+	rowIndex, _ := t.containerView.Table.GetSelection()
 	container := t.getSelectedContainer(rowIndex, filterRunning)
 	if container == nil {
 		return false
 	}
 
-	// Validate container ID to prevent command injection
 	if !isValidContainerID(string(container.ID)) {
 		t.showStatusMessage("Invalid container ID")
 		return false
 	}
 
-	// Limit concurrent actions to prevent resource exhaustion
-	if !t.tryAcquireActionSlot() {
+	if !t.actions.TryAcquire() {
+		t.showStatusMessage("Too many pending actions, please wait")
 		return false
 	}
 
@@ -201,14 +164,12 @@ func (t *Tui) handleContainerStop() bool {
 	t.updateLocalCache(container.ID, actionStopping)
 	t.drawContainers()
 
-	// Track the action goroutine for proper cleanup
-	t.actionsWG.Add(1)
+	t.actions.Add(1)
 	go func() {
-		defer t.actionsWG.Done()
-		defer t.releaseActionSlot()
+		defer t.actions.Done()
+		defer t.actions.Release()
 
-		// Use the shared actions context with timeout to prevent hanging
-		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(t.actions.Context(), 30*time.Second)
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "docker", "stop", string(container.ID))
@@ -229,20 +190,19 @@ func (t *Tui) handleContainerStop() bool {
 
 // handleContainerRestart restarts a running container or starts a stopped one.
 func (t *Tui) handleContainerRestart() bool {
-	rowIndex, _ := t.tableContainer.GetSelection()
+	rowIndex, _ := t.containerView.Table.GetSelection()
 	container := t.getSelectedContainer(rowIndex, filterAny)
 	if container == nil {
 		return false
 	}
 
-	// Validate container ID to prevent command injection
 	if !isValidContainerID(string(container.ID)) {
 		t.showStatusMessage("Invalid container ID")
 		return false
 	}
 
-	// Limit concurrent actions to prevent resource exhaustion
-	if !t.tryAcquireActionSlot() {
+	if !t.actions.TryAcquire() {
+		t.showStatusMessage("Too many pending actions, please wait")
 		return false
 	}
 
@@ -257,14 +217,12 @@ func (t *Tui) handleContainerRestart() bool {
 	t.updateLocalCache(container.ID, action)
 	t.drawContainers()
 
-	// Track the action goroutine for proper cleanup
-	t.actionsWG.Add(1)
+	t.actions.Add(1)
 	go func() {
-		defer t.actionsWG.Done()
-		defer t.releaseActionSlot()
+		defer t.actions.Done()
+		defer t.actions.Release()
 
-		// Use the shared actions context with timeout to prevent hanging
-		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(t.actions.Context(), 30*time.Second)
 		defer cancel()
 
 		var cmd *exec.Cmd
@@ -291,20 +249,19 @@ func (t *Tui) handleContainerRestart() bool {
 
 // handleContainerRemove removes the selected stopped container.
 func (t *Tui) handleContainerRemove() bool {
-	rowIndex, _ := t.tableContainer.GetSelection()
+	rowIndex, _ := t.containerView.Table.GetSelection()
 	container := t.getSelectedContainer(rowIndex, filterNotRunning)
 	if container == nil {
 		return false
 	}
 
-	// Validate container ID to prevent command injection
 	if !isValidContainerID(string(container.ID)) {
 		t.showStatusMessage("Invalid container ID")
 		return false
 	}
 
-	// Limit concurrent actions to prevent resource exhaustion
-	if !t.tryAcquireActionSlot() {
+	if !t.actions.TryAcquire() {
+		t.showStatusMessage("Too many pending actions, please wait")
 		return false
 	}
 
@@ -312,14 +269,12 @@ func (t *Tui) handleContainerRemove() bool {
 	t.updateLocalCache(container.ID, actionRemoving)
 	t.drawContainers()
 
-	// Track the action goroutine for proper cleanup
-	t.actionsWG.Add(1)
+	t.actions.Add(1)
 	go func() {
-		defer t.actionsWG.Done()
-		defer t.releaseActionSlot()
+		defer t.actions.Done()
+		defer t.actions.Release()
 
-		// Use the shared actions context with timeout to prevent hanging
-		ctx, cancel := context.WithTimeout(t.actionsCtx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(t.actions.Context(), 30*time.Second)
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "docker", "rm", string(container.ID))
