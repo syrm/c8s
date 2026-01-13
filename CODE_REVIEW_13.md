@@ -55,7 +55,7 @@ func (t *Tui) getProjectName() string {
     t.tableProjectDataLock.RLock()
     defer t.tableProjectDataLock.RUnlock()
 
-    if project, ok := t.tableProjectData[dto.ProjectID(currentProjectID)]; ok {
+    if project, ok := t.tableProjectData[model.ProjectID(currentProjectID)]; ok {
         return project.Name
     }
     return "unknown"
@@ -146,7 +146,7 @@ func setupStyles() {
 **Fichiers:** `tui/sorting.go:69-90, 107-124`
 
 ```go
-func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending bool) int {
+func compareProjects(a, b model.Project, sortColumn projectSortColumn, ascending bool) int {
     var cmp int
     switch sortColumn {
     case projectSortName:
@@ -204,13 +204,13 @@ logPaused atomic.Bool
 
 ```go
 // tui/tui.go:667
-t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: response}
+t.requestData <- &model.RequestProject{ProjectID: model.ProjectID(currentProjectID), Response: response}
 
 // currentProjectID est déjà un string, mais la conversion est nécessaire
-// car le champ est de type dto.ProjectID
+// car le champ est de type model.ProjectID
 ```
 
-**Observation:** Ces conversions sont techniquement nécessaires en Go mais verboses. Une alternative serait de stocker les IDs directement comme `dto.ProjectID` et `dto.ContainerID` dans le TUI au lieu de `string`.
+**Observation:** Ces conversions sont techniquement nécessaires en Go mais verboses. Une alternative serait de stocker les IDs directement comme `model.ProjectID` et `model.ContainerID` dans le TUI au lieu de `string`.
 
 ---
 
@@ -230,7 +230,7 @@ t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID),
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données | ✅ RWMutex + Channels |
-| Timeouts systématiques | ✅ `dto.ChannelTimeout` partout |
+| Timeouts systématiques | ✅ `model.ChannelTimeout` partout |
 | Context propagation | ✅ Toutes les goroutines respectent ctx.Done() |
 | Copie des données | ✅ Aucune référence partagée |
 
@@ -242,7 +242,7 @@ t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID),
 | `errors.Is()` | ✅ |
 | Documentation exports | ✅ |
 | Constantes nommées | ✅ |
-| Status strings | ✅ dto.StatusRunning, etc. |
+| Status strings | ✅ model.StatusRunning, etc. |
 | Action strings | ✅ actionStopping, etc. |
 | Default case type switch | ✅ |
 | Context shadowing évité | ✅ childCtx |

@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
-	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/internal/model"
 	itimer "github.com/syrm/c8s/internal/timer"
 )
 
@@ -34,7 +35,7 @@ func isValidContainerID(id string) bool {
 }
 
 // getSelectedContainer returns the container at the selected row, filtered by status.
-func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *dto.Container {
+func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *model.Container {
 	if rowIndex <= 0 {
 		return nil
 	}
@@ -45,7 +46,7 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
-	containers := t.containerView.Data.Values()
+	containers := t.containerView.Values()
 	for _, container := range containers {
 		if cellText != container.Service {
 			continue
@@ -53,11 +54,11 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 
 		switch filter {
 		case filterRunning:
-			if container.Status != dto.StatusRunning {
+			if container.Status != model.StatusRunning {
 				continue
 			}
 		case filterNotRunning:
-			if container.Status == dto.StatusRunning {
+			if container.Status == model.StatusRunning {
 				continue
 			}
 		}
@@ -69,9 +70,9 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 }
 
 // setPendingAction sends a request to set a pending action on a container.
-func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
+func (t *Tui) setPendingAction(containerID model.ContainerID, action string) {
 	response := make(chan bool, 1)
-	if !t.sendRequest(&dto.RequestSetPendingAction{
+	if !t.sendRequest(&model.RequestSetPendingAction{
 		ContainerID:   containerID,
 		PendingAction: action,
 		Response:      response,
@@ -89,10 +90,10 @@ func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
 }
 
 // updateLocalCache updates the local container cache with a pending action.
-func (t *Tui) updateLocalCache(containerID dto.ContainerID, action string) {
-	if c, ok := t.containerView.Data.Get(containerID); ok {
+func (t *Tui) updateLocalCache(containerID model.ContainerID, action string) {
+	if c, ok := t.containerView.Get(containerID); ok {
 		c.PendingAction = action
-		t.containerView.Data.Set(containerID, c)
+		t.containerView.Set(containerID, c)
 	}
 }
 
@@ -149,7 +150,7 @@ type containerActionParams struct {
 
 // runContainerAction runs a docker command on a container asynchronously.
 // The container must already be validated before calling this function.
-func (t *Tui) runContainerAction(container *dto.Container, params containerActionParams) bool {
+func (t *Tui) runContainerAction(container *model.Container, params containerActionParams) bool {
 	if !t.actions.TryAcquire() {
 		t.showStatusMessage("Too many pending actions, please wait")
 		return false
@@ -183,7 +184,7 @@ func (t *Tui) runContainerAction(container *dto.Container, params containerActio
 }
 
 // validateAndGetContainer gets and validates a container for an action.
-func (t *Tui) validateAndGetContainer(filter containerStatusFilter) *dto.Container {
+func (t *Tui) validateAndGetContainer(filter containerStatusFilter) *model.Container {
 	rowIndex, _ := t.containerView.Table.GetSelection()
 	container := t.getSelectedContainer(rowIndex, filter)
 	if container == nil {
@@ -219,7 +220,7 @@ func (t *Tui) handleContainerRestart() bool {
 		return false
 	}
 
-	if container.Status == dto.StatusRunning {
+	if container.Status == model.StatusRunning {
 		return t.runContainerAction(container, containerActionParams{
 			pendingAction: actionRestarting,
 			dockerCmd:     "restart",
@@ -247,4 +248,70 @@ func (t *Tui) handleContainerRemove() bool {
 		timeoutMsg:    "Remove container timed out",
 		errorMsg:      "Failed to remove container: %v",
 	})
+}
+
+// ActionController manages container action goroutines.
+type ActionController struct {
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	wg            sync.WaitGroup
+	sem           chan struct{}
+	maxConcurrent int
+}
+
+// NewActionController creates a new ActionController with placeholder context.
+// Call Start(ctx) to initialize with a proper parent context.
+func NewActionController(maxConcurrent int) *ActionController {
+	return &ActionController{
+		ctx:           context.Background(), // Placeholder until Start() is called
+		sem:           make(chan struct{}, maxConcurrent),
+		maxConcurrent: maxConcurrent,
+	}
+}
+
+// Start initializes the ActionController with a parent context.
+// This should be called before using the controller.
+func (a *ActionController) Start(parent context.Context) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ctx, a.cancel = context.WithCancel(parent)
+}
+
+func (a *ActionController) Context() context.Context {
+	return a.ctx
+}
+
+func (a *ActionController) TryAcquire() bool {
+	select {
+	case a.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *ActionController) Release() {
+	<-a.sem
+}
+
+func (a *ActionController) Add(delta int) {
+	a.wg.Add(delta)
+}
+
+func (a *ActionController) Done() {
+	a.wg.Done()
+}
+
+func (a *ActionController) Cancel() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel != nil {
+		a.cancel()
+		a.cancel = nil
+	}
+}
+
+func (a *ActionController) Wait() {
+	a.wg.Wait()
 }

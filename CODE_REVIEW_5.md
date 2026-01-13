@@ -71,13 +71,13 @@ copy(d.Logs, c.Logs)                   // slice header lu sans synchro
 select {
 case c.Command <- ContainerCommand{
     functor: func(container *Container) {
-        dto := dto.Container{
-            ID: dto.ContainerID(container.ID),
+        dto := model.Container{
+            ID: model.ContainerID(container.ID),
             // ... copier tous les champs
             Logs: make([]string, len(container.Logs)),
         }
-        copy(dto.Logs, container.Logs)
-        dto.LogCancel = cancel
+        copy(model.Logs, container.Logs)
+        model.LogCancel = cancel
         r.Response <- dto
     },
 }:
@@ -92,7 +92,7 @@ case c.Command <- ContainerCommand{
 **Fichier:** `tui/sorting.go:56-68`
 
 ```go
-func filterContainers(containers []dto.Container, query string) []dto.Container {
+func filterContainers(containers []model.Container, query string) []model.Container {
     // ...
 }
 ```
@@ -121,7 +121,7 @@ t.tableProjectDataLock.RUnlock()
 **Recommandation:** Copier les données sous lock, puis effectuer les opérations tview sans lock :
 ```go
 t.tableProjectDataLock.RLock()
-projectsCopy := make([]dto.Project, 0, len(t.tableProjectData))
+projectsCopy := make([]model.Project, 0, len(t.tableProjectData))
 for _, p := range t.tableProjectData {
     projectsCopy = append(projectsCopy, p)
 }
@@ -237,7 +237,7 @@ func sendWithTimeout[T any](ctx context.Context, ch chan<- T, value T, timeout t
 **Fichier:** `tui/sorting.go:41-53`
 
 ```go
-filtered := make([]dto.Project, 0, len(projects))  // Bonne pratique, déjà fait
+filtered := make([]model.Project, 0, len(projects))  // Bonne pratique, déjà fait
 ```
 
 Ceci est déjà bien implémenté.

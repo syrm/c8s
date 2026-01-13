@@ -87,7 +87,7 @@ index++  // ✅ Idiomatique
 **Fichiers:** `tui/sorting.go:69-90, 105-124`
 
 ```go
-func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending bool) int {
+func compareProjects(a, b model.Project, sortColumn projectSortColumn, ascending bool) int {
     var cmp int
     switch sortColumn {
     case projectSortName:
@@ -130,12 +130,12 @@ tui := &Tui{
 **Fichiers:** `docker/docker.go:303`, `tui/tui.go:659, 690`
 
 ```go
-projects := make(map[dto.ProjectID]dto.Project)  // Sans capacité
+projects := make(map[model.ProjectID]model.Project)  // Sans capacité
 ```
 
 **Suggestion:** Pré-allouer une capacité estimée pour éviter les reallocations :
 ```go
-projects := make(map[dto.ProjectID]dto.Project, len(docker.containers)/10)
+projects := make(map[model.ProjectID]model.Project, len(docker.containers)/10)
 ```
 
 ---
@@ -156,7 +156,7 @@ projects := make(map[dto.ProjectID]dto.Project, len(docker.containers)/10)
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données | ✅ RWMutex appropriés |
-| Timeouts systématiques | ✅ `dto.ChannelTimeout` partout |
+| Timeouts systématiques | ✅ `model.ChannelTimeout` partout |
 | Context propagation | ✅ Toutes les goroutines respectent ctx.Done() |
 | Copie des données | ✅ Slices copiées pour éviter les races |
 | Closing flag | ✅ Protège les callbacks de timer |

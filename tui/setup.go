@@ -7,7 +7,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/internal/model"
 )
 
 // setupStylesOnce ensures styles are only configured once.
@@ -137,7 +137,7 @@ func (t *Tui) enterContainerView() {
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
-	projects := t.projectView.Data.Values()
+	projects := t.projectView.Values()
 	var found bool
 	for _, project := range projects {
 		if cellText == project.Name {
@@ -264,7 +264,7 @@ func (t *Tui) enterLogView() {
 	}
 	cellText := stripWarningPrefix(cell.Text)
 
-	containers := t.containerView.Data.Values()
+	containers := t.containerView.Values()
 	var found bool
 	for _, container := range containers {
 		if cellText == container.Service {
@@ -303,8 +303,8 @@ func (t *Tui) setupLogViewHandler() {
 		}
 
 		if event.Rune() == 'c' {
-			if t.logView.Filter.Get() != "" {
-				t.logView.Filter.Set("")
+			if t.logView.GetFilter() != "" {
+				t.logView.SetFilter("")
 				t.logView.FilterInput.SetText("")
 				t.logView.Layout.RemoveItem(t.logView.FilterInput)
 				t.drawContainerLog()
@@ -332,7 +332,7 @@ func (t *Tui) setupLogViewHandler() {
 func (t *Tui) exitLogView() {
 	currentContainerID := t.nav.ContainerID()
 	if currentContainerID != "" {
-		t.sendRequest(&dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)})
+		t.sendRequest(&model.RequestStopLogCollection{ContainerID: model.ContainerID(currentContainerID)})
 	}
 
 	t.containerView.Table.Clear()
@@ -341,10 +341,10 @@ func (t *Tui) exitLogView() {
 	t.nav.SetView(viewProject)
 	t.nav.SetContainerID("")
 	t.logView.Paused.Store(false)
-	t.logView.Filter.Set("")
+	t.logView.SetFilter("")
 	t.logView.FilterInput.SetText("")
 	t.logView.Layout.RemoveItem(t.logView.FilterInput)
-	t.logView.Data.Clear()
+	t.logView.SetData(nil)
 	t.logView.Disappeared.Store(false)
 	t.updateHeader()
 }
@@ -383,9 +383,9 @@ func (t *Tui) setupSearchCallbacks() {
 
 	t.logView.FilterInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
-			t.logView.Filter.Set(t.logView.FilterInput.GetText())
+			t.logView.SetFilter(t.logView.FilterInput.GetText())
 		} else {
-			t.logView.Filter.Set("")
+			t.logView.SetFilter("")
 			t.logView.FilterInput.SetText("")
 		}
 		t.logView.Layout.RemoveItem(t.logView.FilterInput)
@@ -407,10 +407,10 @@ func (t *Tui) setupModalCallbacks() {
 		t.nav.SetView(viewProject)
 		t.nav.ClearContainerInfo()
 		t.logView.Paused.Store(false)
-		t.logView.Filter.Set("")
+		t.logView.SetFilter("")
 		t.logView.FilterInput.SetText("")
 		t.logView.Layout.RemoveItem(t.logView.FilterInput)
-		t.logView.Data.Clear()
+		t.logView.SetData(nil)
 		t.updateHeader()
 	})
 

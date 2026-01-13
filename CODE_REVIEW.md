@@ -153,7 +153,7 @@ Bien que le code soit correctement implémenté, il y a une dépendance au fait 
 
 ```go
 type Docker struct {
-	requestData       <-chan dto.RequestData  // Reçu en lecture seule
+	requestData       <-chan model.RequestData  // Reçu en lecture seule
 	// ...
 }
 
@@ -184,19 +184,19 @@ Le channel `d.requestData` est en lecture seule pour `Docker`. Il est fermé par
 **Fichier:** `docker/docker.go:260-289`
 
 ```go
-func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) {
+func (d *Docker) handleRequestContainerLog(ctx context.Context, r *model.RequestContainerLog) {
 	response := make(chan *Container, 1)
-	timer1 := time.NewTimer(dto.ChannelTimeout)
+	timer1 := time.NewTimer(model.ChannelTimeout)
 	defer timer.Stop(timer1)  // Ligne 261: OK
 
 	select {
 	case d.containersCommand <- ContainersCommand{/*...*/}:
 	case <-timer1.C:
 		d.logger.Warn("timeout sending to containersCommand in handleRequestContainerLog")
-		r.Response <- dto.Container{}
+		r.Response <- model.Container{}
 		return  // defer: stop timer1 - OK
 	case <-ctx.Done():
-		r.Response <- dto.Container{}
+		r.Response <- model.Container{}
 		return  // defer: stop timer1 - OK
 	}
 
@@ -205,7 +205,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 	case c = <-response:
 	case <-timer1.C:  // PROBLÈME: timer1 n'a pas été stoppé du premier select
 		d.logger.Warn("timeout waiting for response in handleRequestContainerLog")
-		r.Response <- dto.Container{}
+		r.Response <- model.Container{}
 		return
 	// ...
 	}
@@ -227,7 +227,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestCo
 
 ```go
 // docker/docker.go:122-123
-containers: make(map[dto.ContainerID]*Container, initialContainerMapSize),
+containers: make(map[model.ContainerID]*Container, initialContainerMapSize),
 containersCommand: make(chan ContainersCommand, 16),  // Magic number: 16
 
 // docker/container.go:112
@@ -308,7 +308,7 @@ func (t *Tui) drawProjects() {
 	projects = filterProjects(projects, t.projectView.Search.Query())  // Copie supplémentaire
 
 	sortCol, sortAsc := t.projectView.Sort.Get()
-	slices.SortStableFunc(projects, func(a, b dto.Project) int {  // Tri de la copie
+	slices.SortStableFunc(projects, func(a, b model.Project) int {  // Tri de la copie
 		return compareProjects(a, b, sortCol, sortAsc)
 	})
 

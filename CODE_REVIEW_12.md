@@ -140,11 +140,11 @@ type ContainerID string
 
 **Problème:** Le même type est défini dans deux packages, nécessitant des conversions explicites.
 
-**Impact:** Verbosité du code avec de nombreux casts `dto.ContainerID(c.ID)` et `ContainerID(r.ContainerID)`.
+**Impact:** Verbosité du code avec de nombreux casts `model.ContainerID(c.ID)` et `ContainerID(r.ContainerID)`.
 
 **Best practice Go:** Définir les types partagés dans un seul package (dto) et les utiliser partout.
 
-**Correction:** Supprimer `type ContainerID string` de `docker/container.go` et utiliser `dto.ContainerID` directement.
+**Correction:** Supprimer `type ContainerID string` de `docker/container.go` et utiliser `model.ContainerID` directement.
 
 ---
 
@@ -265,7 +265,7 @@ go func() {
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données | ✅ RWMutex + Channels correctement utilisés |
-| Timeouts sur channels | ✅ `dto.ChannelTimeout` systématique |
+| Timeouts sur channels | ✅ `model.ChannelTimeout` systématique |
 | Context propagation | ✅ Toutes les goroutines respectent ctx.Done() |
 | Copie des slices | ✅ Aucune référence partagée entre couches |
 

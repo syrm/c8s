@@ -2,9 +2,42 @@ package tui
 
 import (
 	"strings"
+	"sync"
 
-	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/internal/model"
 )
+
+// SortState provides thread-safe sort column and direction.
+type SortState[T comparable] struct {
+	column T
+	asc    bool
+	mu     sync.RWMutex
+}
+
+func (s *SortState[T]) Get() (T, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.column, s.asc
+}
+
+func (s *SortState[T]) Set(col T, asc bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.column = col
+	s.asc = asc
+}
+
+// Toggle toggles sort direction if same column, otherwise sets new column with default direction.
+func (s *SortState[T]) Toggle(col T, defaultAsc bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.column == col {
+		s.asc = !s.asc
+	} else {
+		s.column = col
+		s.asc = defaultAsc
+	}
+}
 
 // warningPrefix is the tview formatting prefix added to items with high CPU/memory usage.
 const warningPrefix = "[yellow]⚠[-] "
@@ -49,12 +82,12 @@ func fuzzyMatch(text, query string) bool {
 }
 
 // filterProjects returns projects matching the search query.
-func filterProjects(projects []dto.Project, query string) []dto.Project {
+func filterProjects(projects []model.Project, query string) []model.Project {
 	if query == "" {
 		return projects
 	}
 
-	filtered := make([]dto.Project, 0, len(projects))
+	filtered := make([]model.Project, 0, len(projects))
 	for _, project := range projects {
 		if fuzzyMatch(project.Name, query) {
 			filtered = append(filtered, project)
@@ -64,7 +97,7 @@ func filterProjects(projects []dto.Project, query string) []dto.Project {
 }
 
 // compareProjects returns comparison result for sorting projects.
-func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending bool) int {
+func compareProjects(a, b model.Project, sortColumn projectSortColumn, ascending bool) int {
 	var cmp int
 	switch sortColumn {
 	case projectSortName:
@@ -104,7 +137,7 @@ func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending b
 }
 
 // compareContainers returns comparison result for sorting containers.
-func compareContainers(a, b dto.Container, sortColumn containerSortColumn, ascending bool) int {
+func compareContainers(a, b model.Container, sortColumn containerSortColumn, ascending bool) int {
 	var cmp int
 	switch sortColumn {
 	case containerSortName:

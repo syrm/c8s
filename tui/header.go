@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/internal/model"
 )
 
 // getProjectName returns the name of the current project, or "unknown" if not found.
@@ -13,7 +13,7 @@ func (t *Tui) getProjectName() string {
 		return "unknown"
 	}
 
-	if project, ok := t.projectView.Data.Get(dto.ProjectID(currentProjectID)); ok {
+	if project, ok := t.projectView.Get(model.ProjectID(currentProjectID)); ok {
 		return project.Name
 	}
 	return "unknown"
@@ -40,7 +40,7 @@ func (t *Tui) updateHeader() {
 
 // buildProjectListHeader builds the header for the project list view.
 func (t *Tui) buildProjectListHeader() string {
-	count := t.projectView.Data.Len()
+	count := t.projectView.Len()
 
 	filter := ""
 	if q := t.projectView.Search.Query(); q != "" {
@@ -57,7 +57,7 @@ func (t *Tui) buildProjectListHeader() string {
 
 // buildContainerListHeader builds the header for the container list view.
 func (t *Tui) buildContainerListHeader() string {
-	count := t.containerView.Data.Len()
+	count := t.containerView.Len()
 	projectName := t.getProjectName()
 
 	filter := ""
@@ -82,7 +82,7 @@ func (t *Tui) buildLogViewHeader() string {
 		status += " [fuchsia]PAUSED[-]"
 	}
 
-	if f := t.logView.Filter.Get(); f != "" {
+	if f := t.logView.GetFilter(); f != "" {
 		status += fmt.Sprintf(" [white](filter: %s)[-]", f)
 	}
 

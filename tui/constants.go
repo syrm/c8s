@@ -3,7 +3,7 @@ package tui
 import (
 	"time"
 
-	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/internal/model"
 )
 
 // Timing constants
@@ -35,7 +35,7 @@ const (
 )
 
 // channelTimeout is imported from dto for consistent timeout across layers.
-const channelTimeout = dto.ChannelTimeout
+const channelTimeout = model.ChannelTimeout
 
 // View type constants
 type currentView int

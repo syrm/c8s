@@ -69,14 +69,14 @@ default:
 **Fichiers:** `tui/tui.go:654, 685`
 
 ```go
-t.tableProjectData = make(map[dto.ProjectID]dto.Project)
-t.tableContainerData = make(map[dto.ContainerID]dto.Container)
+t.tableProjectData = make(map[model.ProjectID]model.Project)
+t.tableContainerData = make(map[model.ContainerID]model.Container)
 ```
 
 **Suggestion:** Pré-allouer avec la taille connue :
 ```go
-t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))
-t.tableContainerData = make(map[dto.ContainerID]dto.Container, len(containers))
+t.tableProjectData = make(map[model.ProjectID]model.Project, len(projects))
+t.tableContainerData = make(map[model.ContainerID]model.Container, len(containers))
 ```
 
 **Impact:** Micro-optimisation - évite 1-2 reallocations internes de la map.
@@ -109,12 +109,12 @@ func (t *Tui) showStatusMessage(message string) {
 **Fichier:** `tui/header.go:19`
 
 ```go
-if project, ok := t.tableProjectData[dto.ProjectID(currentProjectID)]; ok {
+if project, ok := t.tableProjectData[model.ProjectID(currentProjectID)]; ok {
 ```
 
-**Observation:** `currentProjectID` est un `string` converti en `dto.ProjectID`. Cette conversion est nécessaire car `currentProjectID` est stocké comme `string` dans le TUI.
+**Observation:** `currentProjectID` est un `string` converti en `model.ProjectID`. Cette conversion est nécessaire car `currentProjectID` est stocké comme `string` dans le TUI.
 
-**Suggestion alternative:** Stocker `currentProjectID` directement comme `dto.ProjectID` dans la struct Tui pour éviter les conversions répétées. Ceci est une refactorisation optionnelle.
+**Suggestion alternative:** Stocker `currentProjectID` directement comme `model.ProjectID` dans la struct Tui pour éviter les conversions répétées. Ceci est une refactorisation optionnelle.
 
 ---
 
@@ -134,7 +134,7 @@ if project, ok := t.tableProjectData[dto.ProjectID(currentProjectID)]; ok {
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données | ✅ RWMutex appropriés |
-| Timeouts systématiques | ✅ `dto.ChannelTimeout` partout |
+| Timeouts systématiques | ✅ `model.ChannelTimeout` partout |
 | Context propagation | ✅ Toutes les goroutines respectent ctx.Done() |
 | Copie des données | ✅ Slices copiées pour éviter les races |
 | Closing flag | ✅ Protège les callbacks de timer |

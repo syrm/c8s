@@ -26,7 +26,7 @@ Ce code souffre de **problèmes critiques** qui doivent être corrigés impérat
 **Fichier**: `tui/actions.go:79-87`
 
 ```go
-func (t *Tui) updateLocalCache(containerID dto.ContainerID, action string) {
+func (t *Tui) updateLocalCache(containerID model.ContainerID, action string) {
     t.tableContainerDataLock.Lock()
     if c, ok := t.tableContainerData[containerID]; ok {
         c.PendingAction = action  // MODIFIE LA COPIE LOCALE!
@@ -37,7 +37,7 @@ func (t *Tui) updateLocalCache(containerID dto.ContainerID, action string) {
 ```
 
 **Problème**: Ce code ne fait RIEN d'utile et a une data race:
-1. `c` est une **copie par valeur** de `dto.Container` dans la map
+1. `c` est une **copie par valeur** de `model.Container` dans la map
 2. Modifier `c.PendingAction` modifie la copie locale, PAS la valeur dans la map
 3. Remettre `c` dans la map crée une nouvelle copie
 4. Entre la lecture et l'écriture, une autre goroutine peut modifier la map
@@ -71,7 +71,7 @@ if msg.Action == events.ActionStart || msg.Action == events.ActionUnPause {
 ```go
 select {
 case d.containersCommand <- ContainersCommand{...}:
-case <-time.After(dto.ChannelTimeout):  // CRÉE UN NOUVEAU TIMER À CHAQUE FOIS!
+case <-time.After(model.ChannelTimeout):  // CRÉE UN NOUVEAU TIMER À CHAQUE FOIS!
     d.logger.Warn("timeout...")
     return
 case <-ctx.Done():
@@ -114,7 +114,7 @@ type RequestProjectList struct {
 
 **Exemple dans `docker.go:151`**:
 ```go
-r.Response <- dto.Container{}  // PEUT BLOQUER ICI
+r.Response <- model.Container{}  // PEUT BLOQUER ICI
 return
 ```
 
@@ -258,7 +258,7 @@ if err != nil {
 ```go
 func (t *Tui) drawProjects() {
     t.tableProjectDataLock.RLock()
-    projects := make([]dto.Project, 0, len(t.tableProjectData))  // ALLOCATION
+    projects := make([]model.Project, 0, len(t.tableProjectData))  // ALLOCATION
     for _, p := range t.tableProjectData {
         projects = append(projects, p)  // COPIE
     }
@@ -274,7 +274,7 @@ func (t *Tui) drawProjects() {
 **Fichier**: `tui/sorting.go:66-104` - `compareProjects()`
 
 ```go
-func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending bool) int {
+func compareProjects(a, b model.Project, sortColumn projectSortColumn, ascending bool) int {
     var cmp int
     switch sortColumn {
     case projectSortCPU:
@@ -316,7 +316,7 @@ func (t *Tui) getLogPaused() bool {
 
 ```go
 // tui/constants.go
-const channelTimeout = dto.ChannelTimeout  // RENOMMAGE
+const channelTimeout = model.ChannelTimeout  // RENOMMAGE
 
 // docker/docker.go
 const (

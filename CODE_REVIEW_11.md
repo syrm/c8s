@@ -197,13 +197,13 @@ const (
 
 ```go
 switch r := req.(type) {
-case *dto.RequestContainerLog:
+case *model.RequestContainerLog:
     d.handleRequestContainerLog(ctx, r)
-case *dto.RequestProject:
+case *model.RequestProject:
     d.handleRequestContainerProject(ctx, r)
-case *dto.RequestSetPendingAction:
+case *model.RequestSetPendingAction:
     d.handleRequestSetPendingAction(ctx, r)
-case *dto.RequestProjectList:
+case *model.RequestProjectList:
     d.handleRequestProjectList(ctx, r)
 // ❌ Pas de default case
 }
@@ -254,7 +254,7 @@ type ContainerID string
 
 **Problème:** Le même type est défini dans deux packages différents, nécessitant des conversions explicites.
 
-**Correction:** Utiliser uniquement `dto.ContainerID` partout.
+**Correction:** Utiliser uniquement `model.ContainerID` partout.
 
 ---
 
@@ -295,7 +295,7 @@ type Tui struct {
 
 type projectState struct {
     table       *tview.Table
-    data        map[dto.ProjectID]dto.Project
+    data        map[model.ProjectID]model.Project
     dataLock    sync.RWMutex
     searchInput *tview.InputField
     searchQuery string
@@ -329,7 +329,7 @@ type ContainerMonitor interface {
 
 ```go
 // Au lieu de:
-func NewDocker(ctx context.Context, requestData <-chan dto.RequestData, logger *slog.Logger) (*Docker, error)
+func NewDocker(ctx context.Context, requestData <-chan model.RequestData, logger *slog.Logger) (*Docker, error)
 
 // Considérer:
 type DockerOption func(*Docker)

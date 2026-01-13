@@ -52,7 +52,7 @@ Aucune.
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données | ✅ RWMutex appropriés |
-| Timeouts systématiques | ✅ `dto.ChannelTimeout` partout |
+| Timeouts systématiques | ✅ `model.ChannelTimeout` partout |
 | Context propagation | ✅ Toutes les goroutines respectent ctx.Done() |
 | Copie des données | ✅ Slices copiées pour éviter les races |
 | Closing flag | ✅ Protège les callbacks de timer |

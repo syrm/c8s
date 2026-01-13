@@ -204,7 +204,7 @@ t.actionsCancelLock.Unlock()
 
 **Pattern 1** (`docker/docker.go:155-184`): Créer avec defer Stop
 ```go
-timer1 := time.NewTimer(dto.ChannelTimeout)
+timer1 := time.NewTimer(model.ChannelTimeout)
 defer timer1.Stop()
 select {
 case d.containersCommand <- ...:
@@ -215,12 +215,12 @@ case <-timer1.C:
 
 **Pattern 2** (`docker/docker.go:282-304`): Stop puis Reset
 ```go
-timer2 := time.NewTimer(dto.ChannelTimeout)
+timer2 := time.NewTimer(model.ChannelTimeout)
 timer2.Stop()  // ← Stop immédiatement
-timer3 := time.NewTimer(dto.ChannelTimeout)
+timer3 := time.NewTimer(model.ChannelTimeout)
 timer3.Stop()
 // Plus tard:
-timer2.Reset(dto.ChannelTimeout)  // ← Reset après Stop
+timer2.Reset(model.ChannelTimeout)  // ← Reset après Stop
 ```
 
 **Pattern 3** (`tui/tui.go:609-636`): Réutiliser timer pour plusieurs selects
@@ -329,7 +329,7 @@ func (t *Tui) refreshProjectList() {
     // ...
     case projects := <-response:
         t.tableProjectDataLock.Lock()
-        t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))  // ← Nouvelle map!
+        t.tableProjectData = make(map[model.ProjectID]model.Project, len(projects))  // ← Nouvelle map!
         for _, p := range projects {
             t.tableProjectData[p.ID] = p
         }
@@ -348,7 +348,7 @@ func (t *Tui) refreshProjectList() {
 // refreshContainerList (lignes 656-672) - MEILLEUR pattern:
 t.tableContainerDataLock.Lock()
 // Update map in place instead of recreating
-activeContainers := make(map[dto.ContainerID]struct{}, len(containers))
+activeContainers := make(map[model.ContainerID]struct{}, len(containers))
 for _, c := range containers {
     t.tableContainerData[c.ID] = c
     activeContainers[c.ID] = struct{}{}

@@ -76,7 +76,7 @@ logger.InfoContext(ctx, "c8s is over")  // ctx est annulé
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données partagées | ✅ RWMutex pour TUI, Channels pour Docker |
-| Timeouts sur opérations channel | ✅ `dto.ChannelTimeout` centralisé |
+| Timeouts sur opérations channel | ✅ `model.ChannelTimeout` centralisé |
 | Propagation de contexte | ✅ Toutes les goroutines respectent `ctx.Done()` |
 | Copie des slices | ✅ Aucune référence partagée entre couches |
 
@@ -96,7 +96,7 @@ logger.InfoContext(ctx, "c8s is over")  // ctx est annulé
 | Matching exact | ✅ `stripWarningPrefix()` + `==` |
 | Navigation sécurisée | ✅ Vérification `found` avant changement de page |
 | Manipulation de chaînes | ✅ `strings.TrimSuffix()` sécurisé |
-| Constantes centralisées | ✅ `dto.ChannelTimeout` unique |
+| Constantes centralisées | ✅ `model.ChannelTimeout` unique |
 
 ---
 

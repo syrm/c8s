@@ -31,7 +31,7 @@ Aucun problème majeur identifié.
 **Fichier:** `tui/sorting.go:56-68`
 
 ```go
-func filterContainers(containers []dto.Container, query string) []dto.Container {
+func filterContainers(containers []model.Container, query string) []model.Container {
     // ...
 }
 ```
@@ -47,7 +47,7 @@ func filterContainers(containers []dto.Container, query string) []dto.Container 
 **Fichier:** `tui/setup.go:386-403`
 
 ```go
-func (t *Tui) findContainerByService(rowIndex int) *dto.Container {
+func (t *Tui) findContainerByService(rowIndex int) *model.Container {
     // ...
 }
 ```
@@ -97,8 +97,8 @@ d.logger.DebugContext(ctx, "end of container stats", ...)
 **Fichiers:** `docker/docker.go:224, 258`
 
 ```go
-func (d *Docker) handleRequestContainerProject(r *dto.RequestProject) {
-func (d *Docker) handleRequestSetPendingAction(r *dto.RequestSetPendingAction) {
+func (d *Docker) handleRequestContainerProject(r *model.RequestProject) {
+func (d *Docker) handleRequestSetPendingAction(r *model.RequestSetPendingAction) {
 ```
 
 **Problème:** Ces fonctions n'ont pas de paramètre `context.Context`, ce qui empêche de propager proprement l'annulation pendant les opérations imbriquées sur les channels. Cela pourrait causer des délais lors du shutdown si beaucoup de containers existent.
@@ -107,7 +107,7 @@ func (d *Docker) handleRequestSetPendingAction(r *dto.RequestSetPendingAction) {
 
 **Recommandation:** Ajouter un paramètre ctx pour cohérence et meilleure gestion du shutdown :
 ```go
-func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.RequestProject) {
+func (d *Docker) handleRequestContainerProject(ctx context.Context, r *model.RequestProject) {
 ```
 
 ---

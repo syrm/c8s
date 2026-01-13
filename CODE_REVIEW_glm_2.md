@@ -22,8 +22,8 @@ Même après les corrections précédentes, ce code contient **des problèmes cr
 **Fichier**: `docker/docker.go:260-294`
 
 ```go
-func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.RequestProject) {
-    var containers []dto.Container  // ← Déclaré ICI, en dehors du functor
+func (d *Docker) handleRequestContainerProject(ctx context.Context, r *model.RequestProject) {
+    var containers []model.Container  // ← Déclaré ICI, en dehors du functor
 
     select {
     case d.containersCommand <- ContainersCommand{
@@ -102,10 +102,10 @@ for _, c := range docker.containers {
         select {
         case container := <-response:
             containers = append(containers, ...)
-        case <-time.After(dto.ChannelTimeout):
+        case <-time.After(model.ChannelTimeout):
             // ← TIMEOUT = FUIte de goroutine!
         }
-    case <-time.After(dto.ChannelTimeout):
+    case <-time.After(model.ChannelTimeout):
         // ← TIMEOUT = FUIte de goroutine!
     }
 }
@@ -127,7 +127,7 @@ Malgré la "correction" précédente, `time.After()` est **encore utilisé parto
 
 ```go
 // docker/docker.go:229, 250, 279, 288, 313, 320, 339, 348, etc.
-case <-time.After(dto.ChannelTimeout):
+case <-time.After(model.ChannelTimeout):
     // ...
 
 // tui/tui.go:655, 669, 686, 715, 724, etc.
@@ -255,7 +255,7 @@ func (t *Tui) toggleLogPaused() {
 // Pourquoi faire ça?
 ContainersCommand{
     functor: func(docker *Docker) *Container {
-        return docker.containers[dto.ContainerID(dockerContainer.ID)]
+        return docker.containers[model.ContainerID(dockerContainer.ID)]
     },
     response: response,
 }
@@ -273,7 +273,7 @@ ContainersCommand{
 
 ```go
 t.tableProjectDataLock.Lock()
-t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))  // ← ALLOCATION
+t.tableProjectData = make(map[model.ProjectID]model.Project, len(projects))  // ← ALLOCATION
 for _, p := range projects {
     t.tableProjectData[p.ID] = p
 }
@@ -418,7 +418,7 @@ result := make([]string, len(t.tableContainerLogData))  // Allocation
 copy(result, t.tableContainerLogData)                    // Copie
 
 // À chaque refresh de projects:
-t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))  // Allocation
+t.tableProjectData = make(map[model.ProjectID]model.Project, len(projects))  // Allocation
 ```
 
 ### 5.3 COPIE DE SLICES INUTILE
@@ -451,7 +451,7 @@ logContexts vs statsContexts           // ← OK mais pourquoi pas "contexts" av
 func (d *Docker) handleEvents(ctx context.Context) { ... }  // 100+ lignes
 
 // docker/docker.go:138-258
-func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) { ... }  // 120+ lignes
+func (d *Docker) handleRequestContainerLog(ctx context.Context, r *model.RequestContainerLog) { ... }  // 120+ lignes
 ```
 
 **Règle empirique**: Si une fonction fait plus de 50 lignes, elle fait trop de choses.

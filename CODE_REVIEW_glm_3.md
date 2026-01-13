@@ -90,11 +90,11 @@ response := make(chan *Container)  // ← NON BUFFERISÉ!
 select {
 case d.containersCommand <- ContainersCommand{
     functor: func(docker *Docker) *Container {
-        return docker.containers[dto.ContainerID(msg.Actor.ID)]
+        return docker.containers[model.ContainerID(msg.Actor.ID)]
     },
     response: response,
 }:
-case <-time.After(dto.ChannelTimeout):
+case <-time.After(model.ChannelTimeout):
     // Timeout = personne ne lit jamais de response → goroutine bloquée pour toujours
     continue
 case <-ctx.Done():
@@ -104,7 +104,7 @@ case <-ctx.Done():
 var c *Container
 select {
 case c = <-response:
-case <-time.After(dto.ChannelTimeout):
+case <-time.After(model.ChannelTimeout):
     // Timeout = goroutine bloquée dans handleContainersCommand
     continue
 case <-ctx.Done():
@@ -158,7 +158,7 @@ case c.Command <- ContainerCommand{
         }
 
         // Crée et envoie la réponse
-        dtoContainer := dto.Container{
+        dtoContainer := model.Container{
             Logs: make([]string, len(container.Logs)),
             // ...
         }
@@ -287,7 +287,7 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container) {
 
 ```go
 functor: func(docker *Docker) *Container {
-    return docker.containers[dto.ContainerID(msg.Actor.ID)]
+    return docker.containers[model.ContainerID(msg.Actor.ID)]
 }
 ```
 
@@ -393,7 +393,7 @@ Le pattern functor rend le code impossible à tester:
 ```go
 // Comment tester ça?
 functor: func(docker *Docker) *Container {
-    return docker.containers[dto.ContainerID(msg.Actor.ID)]
+    return docker.containers[model.ContainerID(msg.Actor.ID)]
 }
 ```
 

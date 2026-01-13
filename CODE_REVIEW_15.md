@@ -84,10 +84,10 @@ case err, ok := <-errs:
 **Fichier:** `docker/docker.go:325`
 
 ```go
-projectID := dto.ProjectID(container.Project.ID)
+projectID := model.ProjectID(container.Project.ID)
 ```
 
-**Problème:** `container.Project.ID` est déjà de type `dto.ProjectID` (via `dto.ContainerProject.ID`). La conversion est un no-op.
+**Problème:** `container.Project.ID` est déjà de type `model.ProjectID` (via `model.ContainerProject.ID`). La conversion est un no-op.
 
 **Correction:**
 ```go
@@ -103,7 +103,7 @@ projectID := container.Project.ID
 **Fichiers:** `tui/sorting.go:69-90, 105-124`
 
 ```go
-func compareProjects(a, b dto.Project, sortColumn projectSortColumn, ascending bool) int {
+func compareProjects(a, b model.Project, sortColumn projectSortColumn, ascending bool) int {
     var cmp int
     switch sortColumn {
     case projectSortName:
@@ -146,13 +146,13 @@ tui := &Tui{
 **Fichiers:** `tui/tui.go:659, 690`
 
 ```go
-t.tableProjectData = make(map[dto.ProjectID]dto.Project)   // Sans capacité
-t.tableContainerData = make(map[dto.ContainerID]dto.Container)  // Sans capacité
+t.tableProjectData = make(map[model.ProjectID]model.Project)   // Sans capacité
+t.tableContainerData = make(map[model.ContainerID]model.Container)  // Sans capacité
 ```
 
 **Suggestion:** Pré-allouer une capacité estimée pour éviter les reallocations :
 ```go
-t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))
+t.tableProjectData = make(map[model.ProjectID]model.Project, len(projects))
 ```
 
 ---
@@ -173,7 +173,7 @@ t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données | ✅ RWMutex appropriés |
-| Timeouts systématiques | ✅ `dto.ChannelTimeout` partout |
+| Timeouts systématiques | ✅ `model.ChannelTimeout` partout |
 | Context propagation | ✅ Toutes les goroutines respectent ctx.Done() |
 | Copie des données | ✅ Slices copiées pour éviter les races |
 | Closing flag | ✅ Protège les callbacks de timer |

@@ -95,7 +95,7 @@ Après `cancel()`, le programme se termine immédiatement sans attendre que `doc
 
 **`docker/docker.go:173-205`** - handleRequestContainerProject
 ```go
-var containers []dto.Container  // Variable externe
+var containers []model.Container  // Variable externe
 
 select {
 case d.containersCommand <- ContainersCommand{
@@ -161,9 +161,9 @@ Ces fonctions sont définies mais jamais appelées. Code mort.
 
 **`tui/tui.go:641`** et **`tui/tui.go:672`**
 ```go
-t.tableProjectData = make(map[dto.ProjectID]dto.Project)
+t.tableProjectData = make(map[model.ProjectID]model.Project)
 // et
-t.tableContainerData = make(map[dto.ContainerID]dto.Container)
+t.tableContainerData = make(map[model.ContainerID]model.Container)
 ```
 
 À chaque refresh (toutes les 2 secondes), une nouvelle map est allouée. Avec Go 1.21+, on pourrait utiliser `clear()` pour réutiliser la map existante.
@@ -202,7 +202,7 @@ type Tui struct {
     projectView   *ProjectView
     containerView *ContainerView
     logView       *LogView
-    requestData   chan dto.RequestData
+    requestData   chan model.RequestData
     logger        *slog.Logger
 }
 ```

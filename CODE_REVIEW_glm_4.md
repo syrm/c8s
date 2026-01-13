@@ -29,7 +29,7 @@ case <-time.After(channelTimeout):
     // Timer créé mais jamais nettoyé si timeout non atteint
 
 // docker/docker.go:406, 437, 677, 694, 722, 781, 791 - Pareil!
-case <-time.After(dto.ChannelTimeout):
+case <-time.After(model.ChannelTimeout):
     // Timer leak garanti
 ```
 
@@ -124,7 +124,7 @@ func (t *Tui) getLogPaused() bool {
 func (t *Tui) refreshContainerList() {
     // ...
     t.tableContainerDataLock.Lock()
-    t.tableContainerData = make(map[dto.ContainerID]dto.Container, len(containers))
+    t.tableContainerData = make(map[model.ContainerID]model.Container, len(containers))
     for _, c := range containers {
         t.tableContainerData[c.ID] = c
     }
@@ -245,17 +245,17 @@ currentContainerLock       sync.RWMutex // Protects currentProjectID, currentCon
 
 ```go
 // Parfois on log et return:
-case <-time.After(dto.ChannelTimeout):
+case <-time.After(model.ChannelTimeout):
     d.logger.Warn("timeout...")
     return
 
 // Parfois on log et continue:
-case <-time.After(dto.ChannelTimeout):
+case <-time.After(model.ChannelTimeout):
     d.logger.Warn("timeout...")
     continue
 
 // Parfois on log et fait rien:
-case <-time.After(dto.ChannelTimeout):
+case <-time.After(model.ChannelTimeout):
     d.logger.Warn("timeout...")
     // ... continue implicitement
 ```
@@ -308,7 +308,7 @@ func (t *Tui) refreshContainerLog(ctx context.Context) {
 ```go
 func (t *Tui) drawProjects() {
     t.tableProjectDataLock.RLock()
-    projects := make([]dto.Project, 0, len(t.tableProjectData))
+    projects := make([]model.Project, 0, len(t.tableProjectData))
     for _, p := range t.tableProjectData {
         projects = append(projects, p)
     }

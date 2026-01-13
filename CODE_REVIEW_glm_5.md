@@ -22,13 +22,13 @@ Les corrections récentes ont **amélioré certains aspects** (utilisation d'ato
 **Fichier**: `tui/actions.go:84-94`
 
 ```go
-func (t *Tui) updateLocalCache(containerID dto.ContainerID, action string) {
+func (t *Tui) updateLocalCache(containerID model.ContainerID, action string) {
     t.tableContainerDataLock.Lock()
     defer t.tableContainerDataLock.Unlock()
 
     if c, ok := t.tableContainerData[containerID]; ok {
         // Create a new container struct with the updated pending action
-        // This is necessary because dto.Container is a value type in the map
+        // This is necessary because model.Container is a value type in the map
         c.PendingAction = action
         t.tableContainerData[containerID] = c
     }
@@ -67,15 +67,15 @@ case d.containersCommand <- ContainersCommand{
         for _, c := range docker.containers {
             if r.ProjectID == c.Project.ID {
                 response := make(chan ContainerResponse, 1)
-                timer2 := time.NewTimer(dto.ChannelTimeout)
-                timer3 := time.NewTimer(dto.ChannelTimeout)
+                timer2 := time.NewTimer(model.ChannelTimeout)
+                timer3 := time.NewTimer(model.ChannelTimeout)
                 timer2.Stop()  // ← Stoppe immédiatement
                 timer3.Stop()  // ← Stoppe immédiatement
                 select {
                 case c.Command <- ContainerCommand{
                     response: response,
                 }:
-                    timer2.Reset(dto.ChannelTimeout)  // ← Reset après Stop
+                    timer2.Reset(model.ChannelTimeout)  // ← Reset après Stop
                     select {
                     case container := <-response:
                         resultsChan <- containerResponseToDTO(container)
@@ -107,7 +107,7 @@ case d.containersCommand <- ContainersCommand{
 **Solution**:
 ```go
 // Créer le timer UNE fois, l'utiliser, le stopper
-timer2 := time.NewTimer(dto.ChannelTimeout)
+timer2 := time.NewTimer(model.ChannelTimeout)
 defer timer2.Stop()
 
 select {
@@ -200,7 +200,7 @@ cellText := stripWarningPrefix(cell.Text)
 
 **Pattern 1**: `docker/docker.go:155-184` - Créer, defer Stop, utiliser
 ```go
-timer1 := time.NewTimer(dto.ChannelTimeout)
+timer1 := time.NewTimer(model.ChannelTimeout)
 defer timer1.Stop()
 select {
 case d.containersCommand <- ...:
@@ -211,9 +211,9 @@ case <-timer1.C:
 
 **Pattern 2**: `docker/docker.go:276-304` - Créer, Stop, Reset, Stop
 ```go
-timer2 := time.NewTimer(dto.ChannelTimeout)
+timer2 := time.NewTimer(model.ChannelTimeout)
 timer2.Stop()
-timer2.Reset(dto.ChannelTimeout)
+timer2.Reset(model.ChannelTimeout)
 // ... utiliser timer2
 timer2.Stop()
 ```
@@ -385,7 +385,7 @@ func (t *Tui) refreshProjectList() {
     select {
     case projects := <-response:
         t.tableProjectDataLock.Lock()
-        t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))  // ← Nouvelle map
+        t.tableProjectData = make(map[model.ProjectID]model.Project, len(projects))  // ← Nouvelle map
         for _, p := range projects {
             t.tableProjectData[p.ID] = p
         }

@@ -127,7 +127,7 @@ logger.InfoContext(context.Background(), "c8s is over")
 1. **Séparation exemplaire des responsabilités** : TUI et Docker communiquent exclusivement par channels
 2. **Pattern Command Channel** : Accès aux données sérialisé et thread-safe
 3. **DTOs bien définis** : Isolation claire entre les couches
-4. **Constantes centralisées** : `dto.ChannelTimeout` partagé entre les modules
+4. **Constantes centralisées** : `model.ChannelTimeout` partagé entre les modules
 
 ### Concurrence
 5. **Aucun data race** : Vérifié avec `-race`, tous les accès sont protégés

@@ -88,7 +88,7 @@ default:
 **Fichiers:** `tui/tui.go:658-662, 689-693`
 
 ```go
-t.tableProjectData = make(map[dto.ProjectID]dto.Project)
+t.tableProjectData = make(map[model.ProjectID]model.Project)
 // ...
 for _, p := range projects {
     t.tableProjectData[p.ID] = p
@@ -97,7 +97,7 @@ for _, p := range projects {
 
 **Suggestion:** Pré-allouer avec la taille connue :
 ```go
-t.tableProjectData = make(map[dto.ProjectID]dto.Project, len(projects))
+t.tableProjectData = make(map[model.ProjectID]model.Project, len(projects))
 ```
 
 **Impact:** Micro-optimisation - évite les reallocations internes de la map.
@@ -148,7 +148,7 @@ func (t *Tui) showStatusMessage(message string) {
 | Aspect | Évaluation |
 |--------|------------|
 | Protection des données | ✅ RWMutex appropriés |
-| Timeouts systématiques | ✅ `dto.ChannelTimeout` partout |
+| Timeouts systématiques | ✅ `model.ChannelTimeout` partout |
 | Context propagation | ✅ Toutes les goroutines respectent ctx.Done() |
 | Copie des données | ✅ Slices copiées pour éviter les races |
 | Closing flag | ✅ Protège les callbacks de timer |
