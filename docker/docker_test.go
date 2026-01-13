@@ -270,15 +270,17 @@ func TestContainerCommandConcurrency(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	_ = logger // Used for docker instance only
 	c := &Container{
 		ID:      "test-container",
 		Command: make(chan ContainerCommand, 16),
-		logger:  logger,
 	}
 
-	// Start the command handler
+	// Start the command handler in a separate context
+	containerCtx, containerCancel := context.WithCancel(ctx)
+	defer containerCancel()
 	go func() {
-		c.handleCommands(ctx)
+		c.handleCommands(containerCtx)
 	}()
 
 	const numGoroutines = 50
@@ -313,12 +315,9 @@ func TestLogCollectionFlagConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 	c := &Container{
 		ID:      "test-container",
 		Command: make(chan ContainerCommand, 16),
-		logger:  logger,
 	}
 
 	// Start the command handler
@@ -378,12 +377,9 @@ func TestStatsGenConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 	c := &Container{
 		ID:      "test-container",
 		Command: make(chan ContainerCommand, 16),
-		logger:  logger,
 	}
 
 	// Start the command handler
