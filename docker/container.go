@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	apiContainer "github.com/docker/docker/api/types/container"
@@ -13,8 +14,8 @@ import (
 
 
 // Container represents a Docker container with its state and metrics.
-// All access is serialized through the Command channel via handleCommands.
-// This design eliminates the need for per-container mutexes and avoids deadlocks.
+// Most access is serialized through the Command channel via handleCommands.
+// Logs access is protected by logsMu for thread-safety during Delete().
 type Container struct {
 	ID                  dto.ContainerID
 	Service             string
@@ -22,7 +23,6 @@ type Container struct {
 	Project             dto.ContainerProject
 	CPUPercentage       float64
 	MemoryPercentage    float64
-	Logs                []string
 	Status              string
 	PendingAction       string // "starting", "stopping", "restarting", "removing" or ""
 	LogCollectionActive bool
@@ -34,6 +34,10 @@ type Container struct {
 	// When a container restarts, statsGen is incremented. Stats goroutines check if their
 	// generation matches before processing updates.
 	statsGen atomic.Uint64
+	// logsMu protects access to logs slice from concurrent access between
+	// handleCommands (read/write) and Delete() (clear)
+	logsMu sync.RWMutex
+	logs   []string
 }
 
 // ContainerResponse is a snapshot of container state sent through response channels.
@@ -151,24 +155,57 @@ func (c *Container) handleCommands(ctx context.Context) {
 
 const maxLogLines = 1000
 
+// AppendLog adds a log line to the container's log buffer.
+// Thread-safe: protected by logsMu.
 func (c *Container) AppendLog(line string) {
 	if c.deleted.Load() {
 		return
 	}
-	c.Logs = append(c.Logs, line)
+	c.logsMu.Lock()
+	defer c.logsMu.Unlock()
+
+	c.logs = append(c.logs, line)
 	// Limit log size to prevent memory leak
-	if len(c.Logs) > maxLogLines {
+	if len(c.logs) > maxLogLines {
 		// Copy to new slice to release old elements from underlying array
 		newLogs := make([]string, maxLogLines)
-		copy(newLogs, c.Logs[len(c.Logs)-maxLogLines:])
-		c.Logs = newLogs
+		copy(newLogs, c.logs[len(c.logs)-maxLogLines:])
+		c.logs = newLogs
 	}
 }
 
+// GetLogsCopy returns a copy of the logs slice.
+// Thread-safe: protected by logsMu.
+func (c *Container) GetLogsCopy() []string {
+	c.logsMu.RLock()
+	defer c.logsMu.RUnlock()
+
+	if c.logs == nil {
+		return nil
+	}
+	result := make([]string, len(c.logs))
+	copy(result, c.logs)
+	return result
+}
+
+// LogsLen returns the number of log lines.
+// Thread-safe: protected by logsMu.
+func (c *Container) LogsLen() int {
+	c.logsMu.RLock()
+	defer c.logsMu.RUnlock()
+	return len(c.logs)
+}
+
+// Delete marks the container as deleted and cancels its context.
+// Thread-safe: clears logs under lock to prevent race conditions.
 func (c *Container) Delete() {
 	c.deleted.Store(true)
 	c.cancel()
-	c.Logs = nil // Clear logs to free memory
+
+	// Clear logs under lock to prevent race with AppendLog/GetLogsCopy
+	c.logsMu.Lock()
+	c.logs = nil
+	c.logsMu.Unlock()
 }
 
 func (c *Container) SetStatusFromAction(action events.Action) {

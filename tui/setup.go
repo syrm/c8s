@@ -3,13 +3,11 @@ package tui
 import (
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
 	"github.com/syrm/c8s/dto"
-	itimer "github.com/syrm/c8s/internal/timer"
 )
 
 // setupStylesOnce ensures styles are only configured once.
@@ -334,12 +332,7 @@ func (t *Tui) setupLogViewHandler() {
 func (t *Tui) exitLogView() {
 	currentContainerID := t.nav.ContainerID()
 	if currentContainerID != "" {
-		timer := time.NewTimer(channelTimeout)
-		select {
-		case t.requestData <- &dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)}:
-			itimer.Stop(timer)
-		case <-timer.C:
-		}
+		t.sendRequest(&dto.RequestStopLogCollection{ContainerID: dto.ContainerID(currentContainerID)})
 	}
 
 	t.containerView.Table.Clear()

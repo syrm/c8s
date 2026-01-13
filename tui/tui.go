@@ -52,8 +52,9 @@ type Tui struct {
 	tableWidth atomic.Int32
 
 	// Lifecycle
-	dataWG  sync.WaitGroup
-	closing atomic.Bool
+	dataWG    sync.WaitGroup
+	closing   atomic.Bool
+	closeOnce sync.Once
 }
 
 // ProjectView holds all project view state.
@@ -519,6 +520,31 @@ func (t *Tui) GetRequestData() <-chan dto.RequestData {
 	return t.requestData
 }
 
+// sendRequest safely sends a request on the requestData channel.
+// Returns false if the TUI is closing or if the send would block.
+// Recovers from panic if the channel was closed.
+func (t *Tui) sendRequest(req dto.RequestData) bool {
+	if t.closing.Load() {
+		return false
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel was closed during shutdown - this is expected
+		}
+	}()
+
+	timer := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer)
+
+	select {
+	case t.requestData <- req:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func (t *Tui) getData(ctx context.Context) {
 	ticker := time.NewTicker(refreshInterval)
 	defer itimer.StopTicker(ticker)
@@ -551,15 +577,13 @@ func (t *Tui) refreshProjectList() {
 	}
 
 	response := make(chan []dto.Project, 1)
-	timer := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer)
-
-	select {
-	case t.requestData <- &dto.RequestProjectList{Response: response}:
-	case <-timer.C:
-		t.logger.Warn("timeout sending project list request")
+	if !t.sendRequest(&dto.RequestProjectList{Response: response}) {
+		t.logger.Warn("failed to send project list request")
 		return
 	}
+
+	timer := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer)
 
 	select {
 	case projects := <-response:
@@ -579,15 +603,13 @@ func (t *Tui) refreshContainerList() {
 
 	currentProjectID := t.nav.ProjectID()
 	response := make(chan []dto.Container, 1)
-	timer := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer)
-
-	select {
-	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: response}:
-	case <-timer.C:
-		t.logger.Warn("timeout sending container list request")
+	if !t.sendRequest(&dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: response}) {
+		t.logger.Warn("failed to send container list request")
 		return
 	}
+
+	timer := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer)
 
 	select {
 	case containers := <-response:
@@ -620,15 +642,13 @@ func (t *Tui) handleDisappearedContainer(ctx context.Context) {
 	currentContainerID := t.nav.ContainerID()
 
 	response := make(chan dto.Container, 1)
-	timer := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer)
-
-	select {
-	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
-	case <-timer.C:
-		t.logger.Warn("timeout sending container log request in handleDisappearedContainer")
+	if !t.sendRequest(&dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}) {
+		t.logger.Warn("failed to send container log request in handleDisappearedContainer")
 		return
 	}
+
+	timer := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer)
 
 	var c dto.Container
 	select {
@@ -668,15 +688,13 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 		slog.String("project", currentProjectID))
 
 	responseProject := make(chan []dto.Container, 1)
-	timer1 := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer1)
-
-	select {
-	case t.requestData <- &dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: responseProject}:
-	case <-timer1.C:
-		t.logger.Warn("timeout sending project request in tryReconnectContainer")
+	if !t.sendRequest(&dto.RequestProject{ProjectID: dto.ProjectID(currentProjectID), Response: responseProject}) {
+		t.logger.Warn("failed to send project request in tryReconnectContainer")
 		return
 	}
+
+	timer1 := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer1)
 
 	var containers []dto.Container
 	select {
@@ -709,15 +727,13 @@ func (t *Tui) tryReconnectContainer(ctx context.Context) {
 
 	response := make(chan dto.Container, 1)
 	newContainerID := t.nav.ContainerID()
-	timer2 := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer2)
-
-	select {
-	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(newContainerID), Response: response}:
-	case <-timer2.C:
-		t.logger.Warn("timeout sending container log request in tryReconnectContainer")
+	if !t.sendRequest(&dto.RequestContainerLog{ContainerID: dto.ContainerID(newContainerID), Response: response}) {
+		t.logger.Warn("failed to send container log request in tryReconnectContainer")
 		return
 	}
+
+	timer2 := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer2)
 
 	var c dto.Container
 	select {
@@ -740,15 +756,13 @@ func (t *Tui) startLogCollection(ctx context.Context) {
 	currentContainerName := t.nav.ContainerName()
 
 	response := make(chan dto.Container, 1)
-	timer := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer)
-
-	select {
-	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
-	case <-timer.C:
-		t.logger.Warn("timeout sending container log request in startLogCollection")
+	if !t.sendRequest(&dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}) {
+		t.logger.Warn("failed to send container log request in startLogCollection")
 		return
 	}
+
+	timer := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer)
 
 	var c dto.Container
 	select {
@@ -779,15 +793,13 @@ func (t *Tui) updateLogs(ctx context.Context) {
 	currentContainerName := t.nav.ContainerName()
 
 	response := make(chan dto.Container, 1)
-	timer := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer)
-
-	select {
-	case t.requestData <- &dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}:
-	case <-timer.C:
-		t.logger.Warn("timeout sending container log request in updateLogs")
+	if !t.sendRequest(&dto.RequestContainerLog{ContainerID: dto.ContainerID(currentContainerID), Response: response}) {
+		t.logger.Warn("failed to send container log request in updateLogs")
 		return
 	}
+
+	timer := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer)
 
 	var c dto.Container
 	select {
@@ -822,6 +834,9 @@ func (t *Tui) updateLogs(ctx context.Context) {
 }
 
 func (t *Tui) Render(ctx context.Context) error {
+	// Initialize ActionController with parent context
+	t.actions.Start(ctx)
+
 	t.dataWG.Add(1)
 	go func() {
 		defer t.dataWG.Done()
@@ -850,5 +865,8 @@ func (t *Tui) cleanup() {
 	t.containerRefresh.Stop()
 	t.projectRefresh.Stop()
 
-	close(t.requestData)
+	// Use sync.Once to ensure channel is closed exactly once
+	t.closeOnce.Do(func() {
+		close(t.requestData)
+	})
 }

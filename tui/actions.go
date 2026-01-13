@@ -72,18 +72,16 @@ func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *
 // setPendingAction sends a request to set a pending action on a container.
 func (t *Tui) setPendingAction(containerID dto.ContainerID, action string) {
 	response := make(chan bool, 1)
-	timer := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer)
-
-	select {
-	case t.requestData <- &dto.RequestSetPendingAction{
+	if !t.sendRequest(&dto.RequestSetPendingAction{
 		ContainerID:   containerID,
 		PendingAction: action,
 		Response:      response,
-	}:
-	case <-timer.C:
+	}) {
 		return
 	}
+
+	timer := time.NewTimer(channelTimeout)
+	defer itimer.Stop(timer)
 
 	select {
 	case <-response:

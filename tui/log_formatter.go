@@ -93,6 +93,18 @@ func (l *commonLogFormat) getMessage() string {
 	}
 }
 
+// getStringField extracts the first non-empty string value from a map for the given keys.
+func getStringField(data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := data[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 // formatJSONLog parses a JSON log line and formats it for display.
 // Returns the formatted line and whether parsing was successful.
 func formatJSONLog(line string, showTimestamp bool) (string, bool) {
@@ -104,42 +116,41 @@ func formatJSONLog(line string, showTimestamp bool) (string, bool) {
 	dockerTimestamp := strings.TrimSpace(line[:jsonStart])
 	jsonPart := line[jsonStart:]
 
-	// Try structured parsing first (faster for common formats)
-	var logEntry commonLogFormat
-	if err := json.Unmarshal([]byte(jsonPart), &logEntry); err != nil {
+	// Parse JSON only once into map[string]any
+	var logData map[string]any
+	if err := json.Unmarshal([]byte(jsonPart), &logData); err != nil {
 		return "", false
 	}
 
-	logTimestamp := logEntry.getTimestamp()
-	level := logEntry.getLevel()
-	msg := logEntry.getMessage()
+	// Extract known fields from the map
+	logTimestamp := getStringField(logData, "time", "timestamp", "ts", "@timestamp", "t")
+	level := strings.ToUpper(getStringField(logData, "level", "lvl", "severity", "loglevel"))
+	msg := getStringField(logData, "msg", "message", "text")
 
-	// For extra fields, we still need to use map[string]any
-	// but only if the structured fields don't cover everything
+	// Remove known fields to get extras
+	knownFields := []string{
+		"time", "timestamp", "ts", "@timestamp", "t",
+		"level", "lvl", "severity", "loglevel",
+		"msg", "message", "text",
+	}
+	for _, key := range knownFields {
+		delete(logData, key)
+	}
+
+	// Collect remaining fields sorted by key
 	var extras []string
-	var logData map[string]any
-	if err := json.Unmarshal([]byte(jsonPart), &logData); err == nil {
-		// Remove known fields
-		for _, key := range []string{"time", "timestamp", "ts", "@timestamp", "t",
-			"level", "lvl", "severity", "loglevel",
-			"msg", "message", "text"} {
-			delete(logData, key)
+	if len(logData) > 0 {
+		keys := make([]string, 0, len(logData))
+		for k := range logData {
+			keys = append(keys, k)
 		}
+		sort.Strings(keys)
 
-		// Collect remaining fields sorted by key
-		if len(logData) > 0 {
-			keys := make([]string, 0, len(logData))
-			for k := range logData {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-
-			for _, k := range keys {
-				v := logData[k]
-				vStr := fmt.Sprintf("%v", v)
-				vStr = strings.ReplaceAll(vStr, "[", "[[]")
-				extras = append(extras, fmt.Sprintf("[blue]%s[-]=%s", k, vStr))
-			}
+		for _, k := range keys {
+			v := logData[k]
+			vStr := fmt.Sprintf("%v", v)
+			vStr = strings.ReplaceAll(vStr, "[", "[[]")
+			extras = append(extras, fmt.Sprintf("[blue]%s[-]=%s", k, vStr))
 		}
 	}
 
