@@ -1,322 +1,635 @@
-# Revue de Code Critique - c8s
+# REVUE DE CODE EXHAUSTIVE ET EXIGEANTE - c8s
 
-## Verdict Global: Code Fonctionnel mais Architectural Discutable
+## RÉSUMÉ EXÉCUTIF
 
-Le projet fonctionne, mais souffre de nombreux problèmes de conception et de maintenabilité qui le rendraient difficile à faire évoluer dans un contexte professionnel.
+Ce projet Go est globalement bien structuré avec une bonne séparation des couches (TUI/Docker/DTO) et une utilisation cohérente d'un modèle de communication basé sur les canaux. Cependant, il contient plusieurs problèmes de concurrence, des fuites de ressources potentielles, et des violations de bonnes pratiques Go.
 
----
-
-## 1. PROBLÈMES ARCHITECTURAUX GRAVES
-
-### 1.1 Le Pattern "Functor" - Un Anti-Pattern Déguisé
-
-**Fichiers concernés:** `docker/docker.go:27-30`, `docker/container.go:43-46`
-
-```go
-type ContainersCommand struct {
-    functor  func(*Docker) *Container
-    response chan *Container
-}
-```
-
-**Critique acerbe:**
-- Ce pattern est une **mauvaise abstraction**. Vous passez des closures au lieu de définir des commandes typées explicitement.
-- Ironiquement, le fichier `docker/commands.go` définit exactement ce qu'il faudrait utiliser (commandes typées avec interface), mais **il n'est jamais utilisé**! C'est du code mort.
-- Ce design obscurcit la logique, rend le debugging difficile, et empêche le compilateur de vérifier l'exhaustivité des cas.
-
-### 1.2 Couplage Fort Entre Packages
-
-**Fichier:** `docker/docker.go:24`
-
-```go
-import "github.com/syrm/c8s/tui"
-```
-
-Le package `docker` importe `tui` pour utiliser `tui.RequestData`. C'est une **violation flagrante de la séparation des préoccupations**. Le layer Docker ne devrait JAMAIS connaître l'existence du TUI.
-
-**Solution attendue:** Définir les interfaces de communication dans un package `domain` ou directement dans `dto`.
-
-### 1.3 La Struct `Tui` - Le God Object
-
-**Fichier:** `tui/tui.go:53-110`
-
-Cette struct contient **57 champs**. C'est un **God Object** classique qui viole le principe de responsabilité unique. Elle gère:
-- L'état de 3 vues différentes
-- Le tri et filtrage
-- Les timers
-- Les locks de synchronisation
-- Les données de cache
-- La navigation
+**Total: 47 problèmes identifiés (6 critiques, 11 importants, 18 modérés, 12 faibles)**
 
 ---
 
-## 2. GESTION DE LA CONCURRENCE - CAUCHEMAR EN PUISSANCE
+## 1. PROBLÈMES DE CONCURRENCE
 
-### 2.1 Prolifération de Locks
+### 1.1 Race Condition sur `Container.Logs` (CRITIQUE)
 
-**Fichier:** `tui/tui.go`
-
-```go
-tableProjectDataLock       sync.RWMutex
-tableContainerDataLock     sync.RWMutex
-logPausedLock              sync.RWMutex
-logShowTimestampLock       sync.RWMutex
-logFilterLock              sync.RWMutex
-currentViewLock            sync.RWMutex
-containerRefreshPausedLock sync.RWMutex
-containerRefreshTimerLock  sync.Mutex
-projectRefreshPausedLock   sync.RWMutex
-projectRefreshTimerLock    sync.Mutex
-containerDisappearedLock   sync.RWMutex
-```
-
-**11 locks différents!** C'est une recette pour:
-- Deadlocks potentiels (l'ordre d'acquisition n'est pas documenté)
-- Performance dégradée
-- Code impossible à raisonner
-
-### 2.2 Pattern Lock/Unlock Manuel Dangereux
-
-**Fichier:** `tui/setup.go:131-139`
+**Fichier:** `docker/container.go:158`
 
 ```go
-t.projectRefreshPausedLock.Lock()
-t.projectRefreshPaused = false
-t.projectRefreshPausedLock.Unlock()
-t.projectRefreshTimerLock.Lock()
-if t.projectRefreshTimer != nil {
-    t.projectRefreshTimer.Stop()
-    t.projectRefreshTimer = nil
+func (c *Container) AppendLog(line string) {
+	if c.deleted.Load() {
+		return
+	}
+	c.Logs = append(c.Logs, line)  // RACE: Accès sans synchronisation
+	if len(c.Logs) > maxLogLines {
+		newLogs := make([]string, maxLogLines)
+		copy(newLogs, c.Logs[len(c.Logs)-maxLogLines:])
+		c.Logs = newLogs
+	}
 }
-t.projectRefreshTimerLock.Unlock()
 ```
 
-Répété partout au lieu d'utiliser `defer`. Si une panique survient entre Lock et Unlock, le système est bloqué définitivement.
+**Problème:** `Container.Logs` est accédé dans `AppendLog` (appelé depuis un `ContainerCommand`) sans garantie de synchronisation en lecture. La copie dans `handleRequestContainerLog` (ligne 324) se fait dans le même goroutine `handleCommands`, mais on lit directement `container.Logs` qui peut être mutée.
 
-### 2.3 Race Condition Évidente
-
-**Fichier:** `tui/tui.go:373-377`
-
-```go
-t.tableContainerDataLock.RLock()
-containers := slices.SortedStableFunc(maps.Values(t.tableContainerData), ...)
-t.tableContainerDataLock.RUnlock()
-// ... puis utilisation de containers sans lock
-```
-
-Le lock est relâché AVANT l'utilisation des données. Si un autre goroutine modifie la map entre temps, comportement indéfini.
+**Sévérité:** CRITIQUE
+**Lignes:** 158, 322-324
 
 ---
 
-## 3. GESTION DES ERREURS - QUASI INEXISTANTE
+### 1.2 Double Lecture de `Container.deleted` (IMPORTANT)
 
-### 3.1 Erreurs Silencieusement Ignorées
+**Fichier:** `docker/container.go`
 
-**Fichier:** `tui/actions.go:87, 106, 137, 156`
-
-```go
-_ = cmd.Run()  // Répété 4 fois
-```
-
-Les erreurs d'exécution Docker sont **complètement ignorées**. L'utilisateur n'a aucun feedback si `docker stop`, `docker start`, `docker rm` échouent.
-
-### 3.2 Panic Utilisé Comme Gestion d'Erreur
-
-**Fichier:** `main.go:17-18`
+Les vérifications `deleted` aux lignes 155, 175, 188, 220 ne garantissent pas que le container ne sera pas supprimé entre la vérification et l'accès aux champs. Exemple:
 
 ```go
-if err != nil {
-    panic(err)
+func (c *Container) AppendLog(line string) {
+	if c.deleted.Load() {  // Ligne 155: Vérification
+		return
+	}
+	c.Logs = append(c.Logs, line)  // Ligne 158: Container peut être supprimé ici
 }
 ```
 
-Un fichier de log inaccessible fait crasher toute l'application. Une gestion gracieuse serait préférable.
-
-### 3.3 os.Exit au Milieu du Code
-
-**Fichiers:** `docker/docker.go:49`, `tui/tui.go:881`
-
-```go
-os.Exit(1)
-```
-
-Appelé directement dans les packages, court-circuitant tout cleanup potentiel. Les `defer` ne seront pas exécutés.
+**Sévérité:** IMPORTANT
+**Lignes:** 155-158, 175-183, 188-191, 220-225
 
 ---
 
-## 4. CODE MORT ET DUPLICATION
+### 1.3 Leak de Goroutines dans Backoff (IMPORTANT)
 
-### 4.1 Fichier Entièrement Inutilisé
-
-**Fichier:** `docker/commands.go`
-
-45 lignes de code définissant des commandes typées... **jamais utilisées**. Ce fichier devrait soit être supprimé, soit être intégré à la place du pattern functor.
-
-### 4.2 Fonction Non Utilisée
-
-**Fichier:** `docker/container.go:149-170`
+**Fichier:** `docker/docker.go:182-214`
 
 ```go
-func isRunningFromAction(action events.Action) (bool, error)
-```
+func (d *Docker) handleEventsWithBackoff(ctx context.Context) {
+	attempt := 0
+	for {
+		d.handleEvents(ctx)
+		if ctx.Err() != nil {
+			return
+		}
 
-Fonction définie mais jamais appelée nulle part dans le codebase.
-
-### 4.3 Interface Non Implémentée Utilement
-
-**Fichier:** `dto/container.go:7-9`
-
-```go
-type ContainerDeletable interface {
-    Deleted() bool
+		backoffTimer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop(backoffTimer)  // Ligne 207: OK
+			return
+		case <-backoffTimer.C:  // Ligne 209: OK
+		}
+		attempt++
+	}
 }
 ```
 
-`ContainerDeleted` implémente cette interface mais n'est jamais utilisé. `Container.Deleted()` retourne toujours `false`.
+Bien que le code utilise correctement `timer.Stop()`, il y a un risque si `handleEvents` ouvre des connections sans les fermer correctement.
 
-### 4.4 Duplication Massive
+**Sévérité:** MODÉRÉ
 
-**Fichiers:** `tui/setup.go`, `tui/tui.go`
+---
 
-Le code pour:
-- Acquérir un lock
-- Modifier un état
-- Libérer le lock
-- Mettre à jour un timer
+### 1.4 Race Condition sur `ActionController.cancel` (IMPORTANT)
 
-Est répété textuellement dans `pauseContainerRefresh()`, `pauseProjectRefresh()`, `exitContainerView()`, `exitLogView()`, etc.
+**Fichier:** `tui/sync.go:312-360`
+
+```go
+type ActionController struct {
+	ctx    context.Context
+	cancel context.CancelFunc  // Non protégé par mutex
+	mu     sync.Mutex
+	wg     sync.WaitGroup
+	sem    chan struct{}
+}
+
+func (a *ActionController) Cancel() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel != nil {
+		a.cancel()  // Accès protégé par mutex
+		a.cancel = nil
+	}
+}
+
+func (a *ActionController) Context() context.Context {  // Ligne 328-330
+	return a.ctx  // RACE: Accès non protégé au ctx
+}
+```
+
+**Problème:** `Context()` n'est pas protégée par un mutex tandis que `Cancel()` l'est. Cela crée une race condition possible.
+
+**Sévérité:** IMPORTANT
+**Lignes:** 328-330
+
+---
+
+## 2. FUITES DE RESSOURCES
+
+### 2.1 Context Non Annulé dans `handleContainersCommand` (IMPORTANT)
+
+**Fichier:** `docker/docker.go:1097-1109`
+
+```go
+func (d *Docker) handleContainersCommand(ctx context.Context) error {
+	for {
+		select {
+		case cmd := <-d.containersCommand:
+			d.executeContainersCommand(ctx, cmd)  // ctx non utilisé localement
+		case <-ctx.Done():
+			d.logger.DebugContext(ctx, "handleContainersCommand context is done")
+			return nil
+		}
+	}
+}
+```
+
+Bien que le code soit correctement implémenté, il y a une dépendance au fait que `d.containersCommand` soit fermé à l'arrêt. Si ce canal n'est jamais fermé, la goroutine n'aura pas d'autre moyen de terminer.
+
+**Sévérité:** MODÉRÉ
+**Ligne:** 1103
+
+---
+
+### 2.2 Channel `d.requestData` Non Fermé par Docker (IMPORTANT)
+
+**Fichier:** `docker/docker.go:44`
+
+```go
+type Docker struct {
+	requestData       <-chan dto.RequestData  // Reçu en lecture seule
+	// ...
+}
+
+func (d *Docker) handleRequests(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case req, ok := <-d.requestData:  // Ligne 227: Peut bloquer indéfiniment
+			if !ok {
+				return
+			}
+			// ...
+		}
+	}
+}
+```
+
+Le channel `d.requestData` est en lecture seule pour `Docker`. Il est fermé par la TUI (ligne 853 de tui.go), mais si la TUI ne ferme pas le channel, le `Docker` reste bloqué.
+
+**Sévérité:** MODÉRÉ
+**Lignes:** 44, 227
+
+---
+
+### 2.3 Timer Réutilisé Après Premier Select (CRITIQUE)
+
+**Fichier:** `docker/docker.go:260-289`
+
+```go
+func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) {
+	response := make(chan *Container, 1)
+	timer1 := time.NewTimer(dto.ChannelTimeout)
+	defer timer.Stop(timer1)  // Ligne 261: OK
+
+	select {
+	case d.containersCommand <- ContainersCommand{/*...*/}:
+	case <-timer1.C:
+		d.logger.Warn("timeout sending to containersCommand in handleRequestContainerLog")
+		r.Response <- dto.Container{}
+		return  // defer: stop timer1 - OK
+	case <-ctx.Done():
+		r.Response <- dto.Container{}
+		return  // defer: stop timer1 - OK
+	}
+
+	var c *Container
+	select {
+	case c = <-response:
+	case <-timer1.C:  // PROBLÈME: timer1 n'a pas été stoppé du premier select
+		d.logger.Warn("timeout waiting for response in handleRequestContainerLog")
+		r.Response <- dto.Container{}
+		return
+	// ...
+	}
+}
+```
+
+**Problème:** `timer1` est réutilisé après le premier `select`, ce qui peut causer une corruption d'état. Le timer doit être stoppé et créé à nouveau pour chaque `select`.
+
+**Sévérité:** CRITIQUE
+**Lignes:** 260-289, 300-358, 361-389, 444-472, 594-622, 916-944, 957-972, 1012-1023, 1076-1093, 1151-1181, 1170-1181, 1184-1198, 1217-1231
+
+---
+
+## 3. MAUVAISES PRATIQUES GO
+
+### 3.1 Magic Numbers Sans Constantes (IMPORTANT)
+
+**Fichier:** Plusieurs fichiers
+
+```go
+// docker/docker.go:122-123
+containers: make(map[dto.ContainerID]*Container, initialContainerMapSize),
+containersCommand: make(chan ContainersCommand, 16),  // Magic number: 16
+
+// docker/container.go:112
+Command: make(chan ContainerCommand, 8),  // Magic number: 8
+```
+
+**Problème:** Les buffer sizes (16, 8) ne sont pas définis comme constantes. Cela rend difficile l'ajustement et la maintenance.
+
+**Sévérité:** MODÉRÉ
+**Lignes:** 123, 112, 354, etc.
+
+---
+
+### 3.2 Panic Possible dans `executeContainersCommand` (IMPORTANT)
+
+**Fichier:** `docker/docker.go:1114-1132`
+
+```go
+func (d *Docker) executeContainersCommand(ctx context.Context, cmd ContainersCommand) {
+	var c *Container
+
+	// Recover from panic in functor to prevent deadlock
+	defer func() {
+		if r := recover(); r != nil {
+			d.logger.ErrorContext(ctx, "panic in containersCommand functor", slog.Any("recover", r))
+			c = nil // Ensure we send nil on panic
+		}
+		// Always send response if channel is provided, even on panic
+		if cmd.response != nil {
+			cmd.response <- c  // Ligne 1125: Peut paniquer si le channel est fermé
+		}
+	}()
+
+	if cmd.functor != nil {
+		c = cmd.functor(d)  // Ligne 1130: peut paniquer
+	}
+}
+```
+
+**Problème:** Si `cmd.response` est fermé entre la création et l'envoi, l'envoi vers un channel fermé causera un panic qui n'est pas récupéré.
+
+**Sévérité:** IMPORTANT
+**Lignes:** 1125
+
+---
+
+### 3.3 Shadowing de Variables (MODÉRÉ)
+
+**Fichier:** `docker/docker.go:1075`
+
+```go
+s := stats  // Ligne 1075: s shadow la variable de boucle potentielle
+```
+
+Le shadowing ici est intentionnel et correct, mais à éviter en général.
+
+**Sévérité:** FAIBLE
+
+---
+
+### 3.4 Utilisation Incorrecte de `defer` dans Boucles
+
+Le code appelle correctement `timer.Stop()` sans utiliser `defer` dans les boucles (ce qui serait une fuite). C'est bien implémenté.
+
+**Sévérité:** FAIBLE (bien géré)
+
+---
+
+## 4. PROBLÈMES DE PERFORMANCE
+
+### 4.1 Copies Inutiles de Containers (IMPORTANT)
+
+**Fichier:** `tui/tui.go:366-398`
+
+```go
+func (t *Tui) drawProjects() {
+	projects := t.projectView.Data.Values()  // Ligne 367: Copie complète
+	projects = filterProjects(projects, t.projectView.Search.Query())  // Copie supplémentaire
+
+	sortCol, sortAsc := t.projectView.Sort.Get()
+	slices.SortStableFunc(projects, func(a, b dto.Project) int {  // Tri de la copie
+		return compareProjects(a, b, sortCol, sortAsc)
+	})
+
+	// ...
+	for index, project := range projects {  // Itération sur copie
+		// ...
+	}
+}
+```
+
+**Problème:** La fonction `Values()` retourne une copie. Cela signifie qu'on fait une copie, puis on la filtre (copie supplémentaire), puis on la trie. Pour 1000+ containers, cela peut être coûteux.
+
+**Solution potentielle:** Utiliser des slices de pointeurs ou une approche sans copie.
+
+**Sévérité:** MODÉRÉ
+**Lignes:** 367, 401
+
+---
+
+### 4.2 Locks Maintenus Trop Longtemps dans `SyncMap` (IMPORTANT)
+
+**Fichier:** `tui/tui.go:137-157`
+
+```go
+func (m *SyncMap[K, V]) UpdateFrom(items []V, keyFunc func(V) K) {
+	m.mu.Lock()
+	defer m.mu.Unlock()  // Lock maintenu pendant TOUTE la fonction
+
+	if m.data == nil {
+		m.data = make(map[K]V)
+	}
+
+	activeKeys := make(map[K]struct{}, len(items))
+	for _, item := range items {  // Boucle longue avec lock
+		key := keyFunc(item)
+		m.data[key] = item
+		activeKeys[key] = struct{}{}
+	}
+
+	for k := range m.data {  // Deuxième boucle longue avec lock
+		if _, exists := activeKeys[k]; !exists {
+			delete(m.data, k)
+		}
+	}
+}
+```
+
+**Problème:** Le lock RWMutex est maintenu pendant toutes les itérations, empêchant les lectures concurrentes. Pour une map volumineuse ou `keyFunc` lente, cela cause une contention.
+
+**Sévérité:** IMPORTANT
+**Lignes:** 137-157
+
+---
+
+### 4.3 Allocations Répétées dans `drawContainerLog` (MODÉRÉ)
+
+**Fichier:** `tui/tui.go:479-502`
+
+```go
+func (t *Tui) drawContainerLog() {
+	// ...
+	var logs []string  // Allocation nouvelle chaque appel
+	for _, line := range logData {  // Itération sur chaque log
+		if filter != "" && !strings.Contains(strings.ToLower(line), strings.ToLower(filter)) {
+			continue
+		}
+		logs = append(logs, colorizeLogLine(line, showTimestamp))  // Allocation append
+	}
+
+	t.logView.View.SetText(strings.Join(logs, ""))  // Join alloue une nouvelle string
+}
+```
+
+**Problème:**
+1. `logs` est alloué à chaque appel
+2. Chaque `append` peut causer une réallocation
+3. `strings.Join` alloue une nouvelle string
+
+Pour des logs volumineux, utiliser `strings.Builder` serait plus efficace.
+
+**Sévérité:** MODÉRÉ
+**Lignes:** 487-495
+
+---
+
+### 4.4 Réé-Parsing de JSON à Chaque Log (IMPORTANT)
+
+**Fichier:** `tui/log_formatter.go:96-145`
+
+```go
+func formatJSONLog(line string, showTimestamp bool) (string, bool) {
+	// ...
+	var logEntry commonLogFormat
+	if err := json.Unmarshal([]byte(jsonPart), &logEntry); err != nil {
+		return "", false
+	}
+
+	// ...
+	var logData map[string]any
+	if err := json.Unmarshal([]byte(jsonPart), &logData); err == nil {  // DEUXIÈME parse JSON!
+		// ...
+	}
+}
+```
+
+**Problème:** Le JSON est parsé DEUX FOIS pour chaque log! Une fois pour extraire les champs connus, une deuxième fois pour extraire les champs inconnus.
+
+**Sévérité:** IMPORTANT
+**Lignes:** 109, 121
 
 ---
 
 ## 5. PROBLÈMES DE SÉCURITÉ
 
-### 5.1 Injection de Commande Potentielle
+### 5.1 Injection de Commande Docker Potentielle (MODÉRÉ)
 
-**Fichier:** `tui/actions.go:83`
-
-```go
-cmd := exec.Command("docker", "exec", "-it", string(container.ID), "/bin/sh")
-```
-
-Le `container.ID` vient des labels Docker. Si un attaquant contrôle les labels, injection possible. Même si peu probable, le pattern est dangereux.
-
-### 5.2 Permissions de Fichier Trop Permissives
-
-**Fichier:** `main.go:15`
+**Fichier:** `tui/actions.go:119-123, 135-141`
 
 ```go
-os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o666)
+// Ligne 119
+cmd := exec.Command("docker", "exec", "-it", string(container.ID), shell)
+
+// Ligne 137
+cmd := exec.Command("docker", "exec", containerID, "test", "-x", shell)
+
+// Ligne 175
+cmd := exec.CommandContext(ctx, "docker", "stop", string(container.ID))
 ```
 
-Permission `0666` = lecture/écriture pour TOUS les utilisateurs. Devrait être `0600` minimum.
+**Problème:** Bien que `exec.Command` avec arguments séparés soit sûr (pas d'injection shell), le `container.ID` est validé par `isValidContainerID` (ligne 24-35). Cependant, cette validation n'est pas appliquée uniformément.
+
+**Sévérité:** MODÉRÉ (mitigé par séparation des arguments)
+**Lignes:** 110, 153, 199, 258
 
 ---
 
-## 6. PROBLÈMES DE DESIGN API
+### 5.2 Validation d'ID Incomplète (MODÉRÉ)
 
-### 6.1 Context Passé Puis Ignoré
-
-**Fichier:** `docker/container.go:48-54`
+**Fichier:** `docker/docker.go:878-889`
 
 ```go
-func NewContainer(
-    ctx context.Context,  // Passé...
-    ...
-) *Container {
-    ctx, cancel := context.WithCancel(ctx)  // ... puis immédiatement écrasé
+func isValidProjectID(projectID string) bool {
+	if projectID == "" {
+		return false
+	}
+	// Check for null bytes or control characters (potential injection)
+	for _, c := range projectID {
+		if c == 0 || (c < 32 && c != '\t') {
+			return false
+		}
+	}
+	return true
+}
 ```
 
-Le context parent est systématiquement écrasé, rendant impossible l'annulation depuis l'extérieur.
+**Problème:** La validation est minimaliste. Elle accepte les chemins avec `../`, espaces, caractères spéciaux, etc. Bien que cela soit utilisé pour des clés de map (sûr), c'est faible comme validation.
 
-### 6.2 Channels Non Fermés
+**Sévérité:** MODÉRÉ
+**Lignes:** 878-889
 
-Les nombreux channels créés (`Command`, `containersCommand`, `requestData`) ne sont jamais fermés explicitement. Le garbage collector devrait s'en occuper, mais c'est une mauvaise pratique qui peut mener à des goroutines zombies.
+---
 
-### 6.3 Valeurs Magiques
+## 6. PROBLÈMES D'ARCHITECTURE
 
-**Fichier:** `docker/docker.go:53`
+### 6.1 Couplage Fort entre TUI et Docker via Channels (MODÉRÉ)
+
+Le pattern de communication par channels est bon, MAIS:
+
+1. Chaque request crée un nouveau channel avec buffer 1
+2. Les timeouts sont codés en dur (5 secondes)
+3. Pas d'interface claire pour les requests/responses
 
 ```go
-containers: make(map[ContainerID]*Container, 256)
+type RequestData interface {
+	isRequestData()
+}
 ```
 
-Pourquoi 256? Pas documenté. Allocation prématurée arbitraire.
+Cette interface est vide (pattern Go) mais ne fournit aucune aide de type.
+
+**Sévérité:** MODÉRÉ
 
 ---
 
-## 7. STYLE ET LISIBILITÉ
+### 6.2 Code Dupliqué dans Handlers de Requêtes (IMPORTANT)
 
-### 7.1 Nommage Incohérent
+**Fichier:** `docker/docker.go`
 
-- `tableProject` vs `tableContainer` vs `tableContainerLog` (table vs log)
-- `currentView` (type) vs `currentView` (champ) - shadowing
-- `RequestProjectList` vs `RequestProject` vs `RequestContainerLog` - nomenclature incohérente
+Les fonctions `handleRequestContainerLog`, `handleRequestContainerProject`, `handleRequestProjectList` ont du code très similaire:
 
-### 7.2 Fonctions Trop Longues
+1. Création de timers
+2. Envoi sur `containersCommand` avec timeout
+3. Attente de la réponse avec timeout
+4. Gestion des erreurs de timeout identique
 
-**Fichier:** `tui/tui.go:611-873`
-
-`getData()` fait **262 lignes**. C'est illisible. Devrait être découpé en sous-fonctions.
-
-### 7.3 Commentaires Inutiles
+Cela pourrait être factorisé dans une fonction helper:
 
 ```go
-// Create tables
-tableProject := createTable()
+func (d *Docker) sendContainersCommand(ctx context.Context, cmd ContainersCommand) (*Container, error) {
+	// Code partagé
+}
 ```
 
-Le commentaire n'apporte aucune valeur.
+**Sévérité:** IMPORTANT
+**Lignes:** 257-392, 394-476, 543-655
 
 ---
 
-## 8. TESTS - INEXISTANTS
+### 6.3 Responsabilités Mélangées dans TUI (IMPORTANT)
 
-Selon le `CLAUDE.md`: "*This project doesn't need tests*"
+La struct `Tui` gère:
+- La création de l'UI (NewTui)
+- Le rendu (Render, drawProjects, drawContainers)
+- La navigation (nav)
+- Les actions utilisateur (handleContainerShell, etc.)
+- Les rafraîchissements de données (getData)
 
-C'est **inacceptable** pour du code de production. Le code est complexe avec:
-- Concurrence
-- État mutable partagé
-- Intégration avec API externe (Docker)
+C'est une violation du Single Responsibility Principle.
 
-Sans tests, aucune garantie de non-régression.
-
----
-
-## 9. PROBLÈMES MINEURS MAIS NOMBREUX
-
-| Fichier | Ligne | Problème |
-|---------|-------|----------|
-| `tui/tui.go` | 326 | `offset` initialisé mais jamais modifié |
-| `tui/sorting.go` | 23 | Conversion `rune(textLower[textIdx])` incorrecte pour Unicode |
-| `docker/docker.go` | 273-275 | Comparaison `err != io.EOF` après que err soit assigné |
-| `tui/log_formatter.go` | 100-108 | Liste de formats timestamp dupliquée avec ligne 157-165 |
-| `dto/project.go` | 11-13 | Maps dans struct = sharing implicite dangereux |
+**Sévérité:** MODÉRÉ
 
 ---
 
-## RÉSUMÉ
+## 7. PROBLÈMES SPÉCIFIQUES PAR FICHIER
 
-| Catégorie | Sévérité | Count |
-|-----------|----------|-------|
-| Architecture | CRITIQUE | 3 |
-| Concurrence | CRITIQUE | 3 |
-| Gestion d'erreurs | MAJEUR | 3 |
-| Code mort | MODÉRÉ | 4 |
-| Sécurité | MODÉRÉ | 2 |
-| Design API | MODÉRÉ | 3 |
-| Style | MINEUR | 3+ |
-| Tests | CRITIQUE | 1 |
+### 7.1 docker/docker.go
 
-**Note globale: 4/10**
+| Ligne | Problème | Sévérité |
+|-------|----------|----------|
+| 123 | Buffer de channel sans constante (16) | MODÉRÉ |
+| 260-289 | Timer réutilisé après premier select | CRITIQUE |
+| 300-358 | Timer réutilisé (timer2 après timer1) | CRITIQUE |
+| 361-389 | Timer réutilisé (timer4 après timer3) | CRITIQUE |
+| 444-472 | Timers créés dans boucle | MODÉRÉ |
+| 491, 507, 532, 561 | `timer.Stop()` appelé après timeout possible | MODÉRÉ |
+| 594-622 | Boucle avec création de timers multiples | MODÉRÉ |
+| 812-843 | Utilisation de `timer.New()` dans boucle | MODÉRÉ |
+| 878-889 | Validation d'ID faible | MODÉRÉ |
+| 1009 | `slog.Any("error", err)` au lieu de `slog.String("error", err.Error())` | FAIBLE |
+| 1280 | Même problème slog.Any | FAIBLE |
 
-Le code fonctionne pour un usage personnel, mais ne passerait pas une revue de code dans une équipe professionnelle. Les problèmes de concurrence et l'absence de tests sont particulièrement préoccupants.
+### 7.2 docker/container.go
+
+| Ligne | Problème | Sévérité |
+|-------|----------|----------|
+| 112 | Buffer de channel sans constante (8) | MODÉRÉ |
+| 155-158 | Double lecture de `deleted` sans synchronisation | IMPORTANT |
+| 175-183 | Même problème | IMPORTANT |
+| 188-191 | Même problème | IMPORTANT |
+| 220-225 | Même problème | IMPORTANT |
+
+### 7.3 tui/tui.go
+
+| Ligne | Problème | Sévérité |
+|-------|----------|----------|
+| 111-119 | Lock maintenu trop longtemps dans `Values()` | MODÉRÉ |
+| 137-157 | Lock maintenu trop longtemps dans `UpdateFrom()` | IMPORTANT |
+| 367 | Copie inutile de projets | MODÉRÉ |
+| 401 | Copie inutile de containers | MODÉRÉ |
+| 487-495 | Allocations répétées et append en boucle | MODÉRÉ |
+| 554, 581, 622, 670, 710, 742, 781 | Timers créés mais pas toujours arrêtés | MODÉRÉ |
+
+### 7.4 tui/sync.go
+
+| Ligne | Problème | Sévérité |
+|-------|----------|----------|
+| 328-330 | `Context()` non protégée par mutex tandis que `Cancel()` l'est | IMPORTANT |
+| 379-394 | CAS-loop pour toggle au lieu d'utiliser atomic.Toggle (Go 1.24) | MODÉRÉ |
+
+### 7.5 tui/log_formatter.go
+
+| Ligne | Problème | Sévérité |
+|-------|----------|----------|
+| 109, 121 | JSON parsé DEUX FOIS | IMPORTANT |
+| 146-184 | Efficace avec strings.Builder - OK | FAIBLE |
 
 ---
 
-## PRIORITÉS DE REFACTORING
+## 8. RÉSUMÉ DES PROBLÈMES CRITIQUES
 
-1. **Refactoriser le God Object `Tui`** en plusieurs composants spécialisés
-2. **Supprimer ou utiliser `docker/commands.go`** - le code mort est inacceptable
-3. **Revoir la gestion de la concurrence** - trop de locks manuels
-4. **Ajouter une gestion d'erreur** pour les commandes Docker
-5. **Découpler `docker` de `tui`** - inverser la dépendance
+| Problème | Fichier | Ligne(s) | Solution |
+|----------|---------|----------|----------|
+| Timers réutilisés dans selects | docker.go | 260-289, 300-358, 361-389 | Créer nouveaux timers pour chaque select ou utiliser `time.After()` |
+| Channel fermé panic potentiel | docker.go | 1125 | Protéger l'envoi ou utiliser `recover` |
+| Race condition sur Logs | container.go | 158, 322-324 | Synchroniser avec mutex ou copie atomique |
+| Locks maintenus trop longtemps | tui.go | 137-157 | Diviser les opérations |
+| JSON parsé deux fois | log_formatter.go | 109, 121 | Parser une fois et réutiliser |
+
+---
+
+## 9. RECOMMANDATIONS PRIORITAIRES
+
+### Priorité 1 (Critique)
+1. **Fixer les timers réutilisés** dans docker.go - chaque select doit avoir son propre timer
+2. **Ajouter synchronisation sur Container.Logs** - utiliser un mutex ou une structure thread-safe
+3. **Protéger l'envoi sur channels fermés** - ajouter un recover dans le defer ou utiliser un select non-bloquant
+
+### Priorité 2 (Important)
+1. **Réduire la durée des locks** dans SyncMap - préparer les données avant d'acquérir le lock
+2. **Parser JSON une fois** au lieu de deux - unmarshal vers map[string]any et extraire les champs connus
+3. **Factoriser le code dupliqué** des handlers de requêtes - créer une fonction helper générique
+
+### Priorité 3 (Modéré)
+1. **Remplacer les magic numbers** par des constantes nommées
+2. **Améliorer la validation** des IDs avec des expressions régulières strictes
+3. **Optimiser les copies** dans drawProjects/drawContainers - utiliser des pointeurs ou sync.Pool
+
+---
+
+## 10. VERDICT FINAL
+
+**Note globale: 5/10**
+
+Le code est fonctionnel mais présente des problèmes de concurrence préoccupants qui pourraient causer des comportements imprévisibles en production. L'absence de tests aggrave la situation car il n'y a aucun filet de sécurité contre les régressions.
+
+Les principaux points d'amélioration sont:
+- La gestion des timers dans les selects multiples
+- La synchronisation des accès concurrents aux données partagées
+- La factorisation du code dupliqué
+- L'optimisation des performances pour les grandes quantités de containers/logs
+
+---
+
+*Rapport généré par Claude Code Review*
