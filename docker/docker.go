@@ -31,7 +31,7 @@ const (
 // Docker manages the connection to the Docker daemon and container monitoring.
 // It provides real-time statistics and log streaming for Docker Compose projects.
 type Docker struct {
-	client            *dockerClient.Client
+	client            DockerAPI
 	containers        map[dto.ContainerID]*Container
 	containersCommand chan ContainersCommand
 	requestData       <-chan dto.RequestData

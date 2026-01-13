@@ -59,23 +59,6 @@ type ContainerCommand struct {
 	response chan ContainerResponse // Must be buffered to prevent deadlock!
 }
 
-// NewContainerCommand creates a new ContainerCommand with a properly buffered response channel.
-// This ensures thread-safety and prevents potential deadlocks.
-func NewContainerCommand(functor func(*Container)) ContainerCommand {
-	return ContainerCommand{
-		functor:  functor,
-		response: make(chan ContainerResponse, 1), // Always buffered
-	}
-}
-
-// NewContainerCommandNoResponse creates a new ContainerCommand without a response channel.
-// Use this when you don't need to receive a response from the command.
-func NewContainerCommandNoResponse(functor func(*Container)) ContainerCommand {
-	return ContainerCommand{
-		functor: functor,
-	}
-}
-
 // NewContainer creates a new Container from a Docker API container summary.
 // It starts a goroutine to handle commands for this container.
 func NewContainer(
