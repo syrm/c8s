@@ -6,11 +6,8 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"time"
 
-	"github.com/syrm/c8s/dto"
-	ch "github.com/syrm/c8s/internal/channel"
-	"github.com/syrm/c8s/internal/timer"
+	"github.com/syrm/c8s/internal/model"
 )
 
 // handleRequests processes TUI requests in a dedicated goroutine.
@@ -28,19 +25,19 @@ func (d *Docker) handleRequests(ctx context.Context) {
 			}
 			switch r := req.(type) {
 
-			case *dto.RequestContainerLog:
+			case *model.RequestContainerLog:
 				d.handleRequestContainerLog(ctx, r)
 
-			case *dto.RequestProject:
+			case *model.RequestProject:
 				d.handleRequestContainerProject(ctx, r)
 
-			case *dto.RequestSetPendingAction:
+			case *model.RequestSetPendingAction:
 				d.handleRequestSetPendingAction(ctx, r)
 
-			case *dto.RequestProjectList:
+			case *model.RequestProjectList:
 				d.handleRequestProjectList(ctx, r)
 
-			case *dto.RequestStopLogCollection:
+			case *model.RequestStopLogCollection:
 				d.handleRequestStopLogCollection(ctx, r)
 
 			default:
@@ -50,182 +47,86 @@ func (d *Docker) handleRequests(ctx context.Context) {
 	}
 }
 
-// logRequestResult holds the combined result from container log request functor.
-type logRequestResult struct {
-	dto       dto.Container
-	needStart bool
-}
-
-func (d *Docker) handleRequestContainerLog(ctx context.Context, r *dto.RequestContainerLog) {
-	// Helper to send empty response
-	sendEmpty := func() { r.Response <- dto.Container{} }
-
-	// Step 1: Get container from map
+func (d *Docker) handleRequestContainerLog(ctx context.Context, r *model.RequestContainerLog) {
 	c := d.getContainer(ctx, r.ContainerID)
 	if c == nil {
-		sendEmpty()
+		r.Response <- model.Container{}
 		return
 	}
 
-	// Step 2: Get container state and logs via serialized command
-	// Use single channel for combined result to avoid ordering issues
-	resultChan := make(chan logRequestResult, 1)
-
-	cmd := ContainerCommand{
-		functor: func(container *Container) {
-			if container.deleted.Load() {
-				resultChan <- logRequestResult{}
-				return
-			}
-
-			// Build DTO with logs copy
-			dtoContainer := dto.Container{
-				ID:               container.ID,
-				Project:          container.Project,
-				Service:          container.Service,
-				Name:             container.Name,
-				CPUPercentage:    container.CPUPercentage,
-				MemoryPercentage: container.MemoryPercentage,
-				Status:           container.Status,
-				PendingAction:    container.PendingAction,
-				Logs:             container.GetLogsCopy(),
-			}
-
-			// Check and set log collection flag atomically
-			needStart := !container.LogCollectionActive
-			if needStart {
-				container.LogCollectionActive = true
-			}
-
-			resultChan <- logRequestResult{dto: dtoContainer, needStart: needStart}
-		},
+	snap := c.Snapshot()
+	
+	// Check and set log collection flag atomically
+	c.mu.Lock()
+	needStart := !c.LogCollectionActive
+	if needStart {
+		c.LogCollectionActive = true
 	}
+	c.mu.Unlock()
 
-	if ch.Send(ctx, c.Command, cmd, dto.ChannelTimeout) != ch.SendOK {
-		d.logger.Warn("timeout sending to container command in handleRequestContainerLog")
-		sendEmpty()
-		return
-	}
-
-	// Step 3: Wait for result
-	result, recvResult := ch.Receive(ctx, resultChan, dto.ChannelTimeout)
-	if recvResult != ch.ReceiveOK {
-		d.logger.Warn("timeout waiting for result in handleRequestContainerLog")
-		sendEmpty()
-		return
-	}
-
-	// Step 4: Start log collection if needed
-	if result.needStart {
+	if needStart {
 		d.startLogCollection(c)
 	}
 
-	r.Response <- result.dto
+	r.Response <- snap
 }
 
-func (d *Docker) handleRequestContainerProject(ctx context.Context, r *dto.RequestProject) {
-	// Get containers matching the project filter
+func (d *Docker) handleRequestContainerProject(ctx context.Context, r *model.RequestProject) {
 	containers := d.getContainersList(ctx, func(c *Container) bool {
 		return r.ProjectID == c.Project.ID
 	})
 
-	if containers == nil {
-		r.Response <- nil
-		return
-	}
-
-	// Query each container for its data
-	result := make([]dto.Container, 0, len(containers))
+	result := make([]model.Container, 0, len(containers))
 	for _, c := range containers {
-		response := make(chan ContainerResponse, 1)
-
-		cmd := ContainerCommand{response: response}
-		if ch.Send(ctx, c.Command, cmd, dto.ChannelTimeout) != ch.SendOK {
-			continue // Skip this container if timeout
-		}
-
-		container, recvResult := ch.Receive(ctx, response, dto.ChannelTimeout)
-		if recvResult == ch.ReceiveOK {
-			result = append(result, containerResponseToDTO(container))
-		}
+		result = append(result, c.Snapshot())
 	}
 
 	r.Response <- result
 }
 
-func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *dto.RequestSetPendingAction) {
-	// Get the container reference
+func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *model.RequestSetPendingAction) {
 	c := d.getContainer(ctx, r.ContainerID)
 	if c == nil {
 		r.Response <- false
 		return
 	}
 
-	// Send command to container
-	cmd := ContainerCommand{
-		functor: func(container *Container) {
-			container.SetPendingAction(r.PendingAction)
-		},
-	}
-
-	if ch.Send(ctx, c.Command, cmd, dto.ChannelTimeout) == ch.SendOK {
-		r.Response <- true
-	} else {
-		d.logger.Warn("timeout sending to container command in handleRequestSetPendingAction")
-		r.Response <- false
-	}
+	c.SetPendingAction(r.PendingAction)
+	r.Response <- true
 }
 
-func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestProjectList) {
-	// Get all containers
+func (d *Docker) handleRequestProjectList(ctx context.Context, r *model.RequestProjectList) {
 	containers := d.getContainersList(ctx, nil)
-	if containers == nil {
-		r.Response <- nil
-		return
-	}
-
-	// Query each container for its data
-	projects := make(map[dto.ProjectID]dto.Project)
+	projects := make(map[model.ProjectID]model.Project)
 
 	for _, c := range containers {
-		response := make(chan ContainerResponse, 1)
+		snap := c.Snapshot()
 
-		cmd := ContainerCommand{response: response}
-		if ch.Send(ctx, c.Command, cmd, dto.ChannelTimeout) != ch.SendOK {
-			continue // Skip this container if timeout
-		}
-
-		container, recvResult := ch.Receive(ctx, response, dto.ChannelTimeout)
-		if recvResult != ch.ReceiveOK {
-			continue // Skip this container if timeout
-		}
-
-		// Aggregate project data
-		projectID := container.Project.ID
+		projectID := snap.Project.ID
 		project, projectExist := projects[projectID]
 
 		if !projectExist {
-			project = dto.Project{
+			project = model.Project{
 				ID:               projectID,
-				Name:             container.Project.Name,
-				ContainersCPU:    make(map[dto.ContainerID]float64),
-				ContainersMemory: make(map[dto.ContainerID]float64),
-				ContainersState:  make(map[dto.ContainerID]string),
+				Name:             snap.Project.Name,
+				ContainersCPU:    make(map[model.ContainerID]float64),
+				ContainersMemory: make(map[model.ContainerID]float64),
+				ContainersState:  make(map[model.ContainerID]string),
 			}
 		}
 
-		project.CPUPercentage += container.CPUPercentage
-		project.ContainersCPU[container.ID] = container.CPUPercentage
-		project.MemoryPercentage += container.MemoryPercentage
-		project.ContainersMemory[container.ID] = container.MemoryPercentage
+		project.CPUPercentage += snap.CPUPercentage
+		project.ContainersCPU[snap.ID] = snap.CPUPercentage
+		project.MemoryPercentage += snap.MemoryPercentage
+		project.ContainersMemory[snap.ID] = snap.MemoryPercentage
 
 		isRunning := 0
-		if container.Status == dto.StatusRunning {
+		if snap.Status == model.StatusRunning {
 			isRunning = 1
 		}
 
 		project.ContainersRunning += isRunning
-		project.ContainersState[container.ID] = container.Status
+		project.ContainersState[snap.ID] = snap.Status
 
 		projects[projectID] = project
 	}
@@ -233,7 +134,7 @@ func (d *Docker) handleRequestProjectList(ctx context.Context, r *dto.RequestPro
 	r.Response <- slices.Collect(maps.Values(projects))
 }
 
-func (d *Docker) handleRequestStopLogCollection(ctx context.Context, r *dto.RequestStopLogCollection) {
+func (d *Docker) handleRequestStopLogCollection(ctx context.Context, r *model.RequestStopLogCollection) {
 	d.logContextsLock.Lock()
 	defer d.logContextsLock.Unlock()
 
@@ -263,19 +164,4 @@ func (d *Docker) startLogCollection(c *Container) {
 		defer d.logCollectorsWG.Done()
 		d.collectContainerLogs(ctxLog, c)
 	}()
-}
-
-// resetLogCollectionFlag resets the LogCollectionActive flag on a container.
-func (d *Docker) resetLogCollectionFlag(c *Container) {
-	resetTimer := time.NewTimer(time.Second)
-	defer timer.Stop(resetTimer)
-	select {
-	case c.Command <- ContainerCommand{
-		functor: func(container *Container) {
-			container.LogCollectionActive = false
-		},
-	}:
-	case <-resetTimer.C:
-		// Timeout waiting to reset flag, container might be deleted
-	}
 }

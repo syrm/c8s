@@ -11,8 +11,7 @@ import (
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 
-	"github.com/syrm/c8s/dto"
-	ch "github.com/syrm/c8s/internal/channel"
+	"github.com/syrm/c8s/internal/model"
 )
 
 func (d *Docker) collectContainers(ctx context.Context) error {
@@ -65,13 +64,13 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		return
 	}
 
-	project := dto.ContainerProject{
-		ID:   dto.ProjectID(projectIDraw),
+	project := model.ContainerProject{
+		ID:   model.ProjectID(projectIDraw),
 		Name: dockerContainer.Labels["com.docker.compose.project"],
 	}
 
 	// Check if container already exists
-	c := d.getContainer(ctx, dto.ContainerID(dockerContainer.ID))
+	c := d.getContainer(ctx, model.ContainerID(dockerContainer.ID))
 	if c != nil {
 		// Container already exists
 		return
@@ -175,34 +174,15 @@ func (d *Docker) getContainerStatsRealtime(ctx context.Context, c *Container, ex
 
 // markContainerExited marks a container as exited.
 func (d *Docker) markContainerExited(ctx context.Context, c *Container) {
-	cmd := ContainerCommand{
-		functor: func(container *Container) {
-			container.Status = dto.StatusExited
-		},
-	}
-
-	if ch.Send(ctx, c.Command, cmd, dto.ChannelTimeout) != ch.SendOK {
-		d.logger.Warn("timeout sending exited status in getContainerStatsRealtime")
-	}
-
+	c.SetStatus(model.StatusExited)
 	d.logger.DebugContext(ctx, "container stopped (stats ended)", slog.String("container_id", string(c.ID)))
 }
 
 // sendStatsUpdate sends a stats update to a container.
 func (d *Docker) sendStatsUpdate(ctx context.Context, c *Container, stats apiContainer.StatsResponse, myGen uint64) {
-	s := stats
-	cmd := ContainerCommand{
-		functor: func(container *Container) {
-			// Double-check generation before updating to prevent race condition
-			if container.statsGen.Load() == myGen {
-				container.Update(s)
-			}
-		},
-	}
-
-	if ch.Send(ctx, c.Command, cmd, dto.ChannelTimeout) != ch.SendOK {
-		// Skip this stats update if timeout
-		d.logger.Debug("timeout sending stats update, skipping")
+	// Double-check generation before updating to prevent race condition
+	if c.statsGen.Load() == myGen {
+		c.Update(stats)
 	}
 }
 

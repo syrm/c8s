@@ -12,7 +12,7 @@ import (
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 
-	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/internal/model"
 )
 
 // mockDockerAPI implements DockerAPI for testing.
@@ -122,11 +122,11 @@ func TestContainersCommandConcurrency(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	d := &Docker{
-		containers:        make(map[dto.ContainerID]*Container),
+		containers:        make(map[model.ContainerID]*Container),
 		containersCommand: make(chan ContainersCommand, 16),
 		logger:            logger,
-		statsContexts:     make(map[dto.ContainerID]context.CancelFunc),
-		logContexts:       make(map[dto.ContainerID]context.CancelFunc),
+		statsContexts:     make(map[model.ContainerID]context.CancelFunc),
+		logContexts:       make(map[model.ContainerID]context.CancelFunc),
 	}
 
 	// Start the command handler
@@ -145,7 +145,7 @@ func TestContainersCommandConcurrency(t *testing.T) {
 		go func(gid int) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
-				containerID := dto.ContainerID("container-" + string(rune('A'+gid%26)))
+				containerID := model.ContainerID("container-" + string(rune('A'+gid%26)))
 
 				// Randomly perform add or get operations
 				if j%2 == 0 {
@@ -174,19 +174,19 @@ func TestGetContainersListConcurrency(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	d := &Docker{
-		containers:        make(map[dto.ContainerID]*Container),
+		containers:        make(map[model.ContainerID]*Container),
 		containersCommand: make(chan ContainersCommand, 16),
 		logger:            logger,
-		statsContexts:     make(map[dto.ContainerID]context.CancelFunc),
-		logContexts:       make(map[dto.ContainerID]context.CancelFunc),
+		statsContexts:     make(map[model.ContainerID]context.CancelFunc),
+		logContexts:       make(map[model.ContainerID]context.CancelFunc),
 	}
 
 	// Pre-populate with containers
 	for i := 0; i < 10; i++ {
-		id := dto.ContainerID("container-" + string(rune('A'+i)))
+		id := model.ContainerID("container-" + string(rune('A'+i)))
 		d.containers[id] = &Container{
 			ID:      id,
-			Project: dto.ContainerProject{ID: dto.ProjectID("/test"), Name: "test"},
+			Project: model.ContainerProject{ID: model.ProjectID("/test"), Name: "test"},
 			Command: make(chan ContainerCommand, 16),
 		}
 	}

@@ -8,8 +8,7 @@ import (
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 
-	"github.com/syrm/c8s/dto"
-	ch "github.com/syrm/c8s/internal/channel"
+	"github.com/syrm/c8s/internal/model"
 	"github.com/syrm/c8s/internal/timer"
 )
 
@@ -97,7 +96,7 @@ func (d *Docker) processEvent(ctx context.Context, msg events.Message) {
 		slog.String("container_id", msg.Actor.ID))
 
 	// Get container from map
-	c := d.getContainer(ctx, dto.ContainerID(msg.Actor.ID))
+	c := d.getContainer(ctx, model.ContainerID(msg.Actor.ID))
 
 	if c != nil {
 		d.handleExistingContainerEvent(ctx, c, msg)
@@ -111,15 +110,7 @@ func (d *Docker) processEvent(ctx context.Context, msg events.Message) {
 // handleExistingContainerEvent processes events for existing containers.
 func (d *Docker) handleExistingContainerEvent(ctx context.Context, c *Container, msg events.Message) {
 	// Update container status
-	cmd := ContainerCommand{
-		functor: func(container *Container) {
-			container.SetStatusFromAction(msg.Action)
-		},
-	}
-
-	if ch.Send(ctx, c.Command, cmd, dto.ChannelTimeout) != ch.SendOK {
-		d.logger.Warn("timeout sending status update in handleEvents")
-	}
+	c.SetStatusFromAction(msg.Action)
 
 	// Handle destroy event
 	if msg.Action == events.ActionDestroy {
