@@ -37,7 +37,8 @@ func (p *ProjectView) Values() []model.Project {
 	defer p.mu.RUnlock()
 	result := make([]model.Project, 0, len(p.data))
 	for _, v := range p.data {
-		result = append(result, v)
+		// Use Copy() to ensure thread-safe access to internal maps
+		result = append(result, v.Copy())
 	}
 	return result
 }

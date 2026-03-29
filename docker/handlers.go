@@ -154,7 +154,8 @@ func (d *Docker) startLogCollection(c *Container) {
 		delete(d.logContexts, c.ID)
 	}
 	// Create new log context using parentCtx to prevent cascading cancellations
-	ctxLog, cancel := context.WithCancel(d.parentCtx)
+	// Use getParentCtx() for thread-safe access
+	ctxLog, cancel := context.WithCancel(d.getParentCtx())
 	d.logContexts[c.ID] = cancel
 	d.logContextsLock.Unlock()
 

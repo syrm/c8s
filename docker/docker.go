@@ -34,15 +34,17 @@ type Docker struct {
 	client            DockerAPI
 	containers        map[model.ContainerID]*Container
 	mu                sync.RWMutex // Protects containers map
-	
+
 	requestData       <-chan model.RequestData
 	logger            *slog.Logger
 	done              chan struct{} // Signals when Run() has completed
-	// parentCtx is the context passed to Run(), used for stats/logs goroutines.
+	// parentCtx is the context used for stats/logs goroutines.
 	// This is separate from errgroup's context to prevent cascading cancellations
 	// when one goroutine in the errgroup fails.
+	// Protected by parentCtxMu for thread-safe access.
 	parentCtx    context.Context
 	parentCancel context.CancelFunc
+	parentCtxMu  sync.RWMutex // Protects parentCtx and parentCancel
 	// statsContexts tracks active stats goroutines to prevent leaks
 	// Key: container ID, Value: cancel function for the stats goroutine
 	statsContexts     map[model.ContainerID]context.CancelFunc
@@ -118,6 +120,10 @@ func NewDocker(
 		return nil, fmt.Errorf("creating docker client: %w", err)
 	}
 
+	// Initialize parentCtx with a background context that will be replaced in Run()
+	// This prevents nil pointer panic if startLogCollection is called before Run()
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+
 	return &Docker{
 		client:            cli,
 		// Pre-allocate map for typical Docker Compose setups
@@ -125,6 +131,8 @@ func NewDocker(
 		requestData:       requestData,
 		logger:            logger,
 		done:              make(chan struct{}),
+		parentCtx:         parentCtx,
+		parentCancel:      parentCancel,
 		statsContexts:     make(map[model.ContainerID]context.CancelFunc),
 		logContexts:       make(map[model.ContainerID]context.CancelFunc),
 	}, nil
@@ -135,14 +143,36 @@ func (d *Docker) Close() error {
 	return d.client.Close()
 }
 
+// getParentCtx returns the parent context in a thread-safe manner.
+// This should be used instead of directly accessing d.parentCtx.
+func (d *Docker) getParentCtx() context.Context {
+	d.parentCtxMu.RLock()
+	defer d.parentCtxMu.RUnlock()
+	return d.parentCtx
+}
+
 // Run starts the Docker monitoring goroutines.
 func (d *Docker) Run(ctx context.Context) {
 	defer close(d.done) // Signal completion when Run exits
 
-	// Store parent context for stats/logs goroutines.
-	// This prevents cascading cancellations when errgroup fails.
+	// Update parent context for stats/logs goroutines.
+	// This replaces the initial background context with the actual run context.
+	// Protected by mutex to prevent race conditions with startLogCollection.
+	d.parentCtxMu.Lock()
+	// Cancel the initial background context
+	if d.parentCancel != nil {
+		d.parentCancel()
+	}
 	d.parentCtx, d.parentCancel = context.WithCancel(ctx)
-	defer d.parentCancel()
+	d.parentCtxMu.Unlock()
+
+	defer func() {
+		d.parentCtxMu.Lock()
+		if d.parentCancel != nil {
+			d.parentCancel()
+		}
+		d.parentCtxMu.Unlock()
+	}()
 
 	eg, errCtx := errgroup.WithContext(ctx)
 

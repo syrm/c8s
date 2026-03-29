@@ -27,6 +27,9 @@ type Container struct {
 
 	mu sync.RWMutex
 
+	// ctx is the container's context, derived from the parent context.
+	// Used for cancellation propagation.
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	// statsGen tracks the current generation of stats goroutine
@@ -48,7 +51,9 @@ func NewContainer(
 		return nil
 	}
 
-	_, cancel := context.WithCancel(ctx)
+	// Create a child context for the container
+	// This allows proper cancellation propagation when the parent context is cancelled
+	childCtx, cancel := context.WithCancel(ctx)
 
 	status := dockerContainer.State
 	if status == "" {
@@ -68,6 +73,7 @@ func NewContainer(
 		Service: dockerContainer.Labels["com.docker.compose.service"],
 		Name:    containerName,
 		Project: project,
+		ctx:     childCtx,
 		cancel:  cancel,
 		Status:  status,
 	}
@@ -132,7 +138,9 @@ func (c *Container) LogsLen() int {
 
 // Delete cancels the container's context and clears resources.
 func (c *Container) Delete() {
-	c.cancel()
+	if c.cancel != nil {
+		c.cancel()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.logs = nil

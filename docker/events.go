@@ -158,7 +158,8 @@ func (d *Docker) restartStatsCollection(ctx context.Context, c *Container) {
 	newGen := c.statsGen.Add(1)
 	// Create new context for stats goroutine using parentCtx
 	// to prevent cascading cancellations from errgroup failures
-	statsCtx, statsCancel := context.WithCancel(d.parentCtx)
+	// Use getParentCtx() for thread-safe access.
+	statsCtx, statsCancel := context.WithCancel(d.getParentCtx())
 	d.statsContexts[c.ID] = statsCancel
 	d.statsContextsLock.Unlock()
 

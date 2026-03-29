@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/syrm/c8s/internal/model"
@@ -16,7 +17,7 @@ func (t *Tui) GetRequestData() <-chan model.RequestData {
 
 // sendRequest safely sends a request on the requestData channel.
 // Returns false if the TUI is closing or if the send would block.
-// Recovers from panic if the channel was closed.
+// Recovers from panic only if the channel was closed during shutdown.
 func (t *Tui) sendRequest(req model.RequestData) bool {
 	if t.closing.Load() {
 		return false
@@ -24,7 +25,17 @@ func (t *Tui) sendRequest(req model.RequestData) bool {
 
 	defer func() {
 		if r := recover(); r != nil {
-			// Channel was closed during shutdown - this is expected
+			// Check if this is a "send on closed channel" panic
+			// which is expected during shutdown
+			errMsg := fmt.Sprintf("%v", r)
+			if strings.Contains(errMsg, "send on closed channel") {
+				// Expected during shutdown - log at debug level
+				t.logger.Debug("sendRequest recovered from closed channel", slog.Any("panic", r))
+				return
+			}
+			// Re-panic for unexpected errors to avoid masking bugs
+			t.logger.Error("sendRequest recovered from unexpected panic", slog.Any("panic", r))
+			panic(r)
 		}
 	}()
 

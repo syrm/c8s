@@ -113,26 +113,20 @@ func createTestContainerSummary(id, name, projectID, projectName string) apiCont
 	}
 }
 
-// TestContainersCommandConcurrency tests that multiple goroutines can safely
-// send commands to containersCommand channel without race conditions.
-func TestContainersCommandConcurrency(t *testing.T) {
+// TestContainersConcurrentAccess tests that multiple goroutines can safely
+// access containers map via mutex-protected methods without race conditions.
+func TestContainersConcurrentAccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	d := &Docker{
-		containers:        make(map[model.ContainerID]*Container),
-		containersCommand: make(chan ContainersCommand, 16),
-		logger:            logger,
-		statsContexts:     make(map[model.ContainerID]context.CancelFunc),
-		logContexts:       make(map[model.ContainerID]context.CancelFunc),
+		containers:    make(map[model.ContainerID]*Container),
+		logger:        logger,
+		statsContexts: make(map[model.ContainerID]context.CancelFunc),
+		logContexts:   make(map[model.ContainerID]context.CancelFunc),
 	}
-
-	// Start the command handler
-	go func() {
-		d.handleContainersCommand(ctx)
-	}()
 
 	// Run multiple goroutines that concurrently access containers
 	const numGoroutines = 50
@@ -151,8 +145,7 @@ func TestContainersCommandConcurrency(t *testing.T) {
 				if j%2 == 0 {
 					// Add container
 					c := &Container{
-						ID:      containerID,
-						Command: make(chan ContainerCommand, 16),
+						ID: containerID,
 					}
 					d.addContainer(ctx, c)
 				} else {
@@ -166,7 +159,7 @@ func TestContainersCommandConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
-// TestGetContainersList tests concurrent access to container list retrieval.
+// TestGetContainersListConcurrency tests concurrent access to container list retrieval.
 func TestGetContainersListConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -174,11 +167,10 @@ func TestGetContainersListConcurrency(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	d := &Docker{
-		containers:        make(map[model.ContainerID]*Container),
-		containersCommand: make(chan ContainersCommand, 16),
-		logger:            logger,
-		statsContexts:     make(map[model.ContainerID]context.CancelFunc),
-		logContexts:       make(map[model.ContainerID]context.CancelFunc),
+		containers:    make(map[model.ContainerID]*Container),
+		logger:        logger,
+		statsContexts: make(map[model.ContainerID]context.CancelFunc),
+		logContexts:   make(map[model.ContainerID]context.CancelFunc),
 	}
 
 	// Pre-populate with containers
@@ -187,14 +179,8 @@ func TestGetContainersListConcurrency(t *testing.T) {
 		d.containers[id] = &Container{
 			ID:      id,
 			Project: model.ContainerProject{ID: model.ProjectID("/test"), Name: "test"},
-			Command: make(chan ContainerCommand, 16),
 		}
 	}
-
-	// Start the command handler
-	go func() {
-		d.handleContainersCommand(ctx)
-	}()
 
 	// Run multiple goroutines that concurrently list containers
 	const numGoroutines = 20
@@ -207,8 +193,11 @@ func TestGetContainersListConcurrency(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				containers := d.getContainersList(ctx, nil)
-				// Just verify we get a result without panicking
-				_ = containers
+				// Verify we get results without panicking
+				if len(containers) == 0 {
+					// Initial state may have containers, but race may cause empty slice
+					// This is expected behavior - just verify no panic
+				}
 			}
 		}()
 	}
@@ -216,7 +205,7 @@ func TestGetContainersListConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
-// TestChannelHelpers tests the channel helper functions under concurrent load.
+// TestChannelHelpersConcurrency tests the channel helper functions under concurrent load.
 func TestChannelHelpersConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -263,48 +252,57 @@ func TestChannelHelpersConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
-// TestContainerCommandConcurrency tests concurrent access to container commands.
-func TestContainerCommandConcurrency(t *testing.T) {
+// TestContainerSnapshotConcurrency tests concurrent access to container snapshot.
+func TestContainerSnapshotConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	_ = logger // Used for docker instance only
 	c := &Container{
 		ID:      "test-container",
-		Command: make(chan ContainerCommand, 16),
+		Service: "test-service",
+		Name:    "test-name",
+		Project: model.ContainerProject{ID: model.ProjectID("/test"), Name: "test"},
 	}
-
-	// Start the command handler in a separate context
-	containerCtx, containerCancel := context.WithCancel(ctx)
-	defer containerCancel()
-	go func() {
-		c.handleCommands(containerCtx)
-	}()
 
 	const numGoroutines = 50
 
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
+	wg.Add(numGoroutines * 2)
 
+	// Writers - append logs
 	for i := 0; i < numGoroutines; i++ {
 		go func(gid int) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				response := make(chan ContainerResponse, 1)
+				c.AppendLog("log line from goroutine")
+
 				select {
-				case c.Command <- ContainerCommand{response: response}:
-					select {
-					case <-response:
-					case <-ctx.Done():
-						return
-					}
 				case <-ctx.Done():
 					return
+				default:
 				}
 			}
 		}(i)
+	}
+
+	// Readers - take snapshots
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				snapshot := c.Snapshot()
+				// Verify snapshot is valid
+				if snapshot.ID != c.ID {
+					t.Errorf("Snapshot ID mismatch: got %s, want %s", snapshot.ID, c.ID)
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+			}
+		}()
 	}
 
 	wg.Wait()
@@ -316,14 +314,8 @@ func TestLogCollectionFlagConcurrency(t *testing.T) {
 	defer cancel()
 
 	c := &Container{
-		ID:      "test-container",
-		Command: make(chan ContainerCommand, 16),
+		ID: "test-container",
 	}
-
-	// Start the command handler
-	go func() {
-		c.handleCommands(ctx)
-	}()
 
 	const numGoroutines = 20
 
@@ -337,27 +329,24 @@ func TestLogCollectionFlagConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			resultCh := make(chan bool, 1)
+			// Simulate checking and setting LogCollectionActive under lock
+			c.mu.Lock()
+			needStart := !c.LogCollectionActive
+			if needStart {
+				c.LogCollectionActive = true
+			}
+			c.mu.Unlock()
+
+			if needStart {
+				countMu.Lock()
+				startedCount++
+				countMu.Unlock()
+			}
+
 			select {
-			case c.Command <- ContainerCommand{
-				functor: func(container *Container) {
-					needStart := !container.LogCollectionActive
-					if needStart {
-						container.LogCollectionActive = true
-					}
-					resultCh <- needStart
-				},
-			}:
-				select {
-				case needStart := <-resultCh:
-					if needStart {
-						countMu.Lock()
-						startedCount++
-						countMu.Unlock()
-					}
-				case <-ctx.Done():
-				}
 			case <-ctx.Done():
+				return
+			default:
 			}
 		}()
 	}
@@ -378,14 +367,8 @@ func TestStatsGenConcurrency(t *testing.T) {
 	defer cancel()
 
 	c := &Container{
-		ID:      "test-container",
-		Command: make(chan ContainerCommand, 16),
+		ID: "test-container",
 	}
-
-	// Start the command handler
-	go func() {
-		c.handleCommands(ctx)
-	}()
 
 	const numGoroutines = 50
 
@@ -403,6 +386,12 @@ func TestStatsGenConcurrency(t *testing.T) {
 					// Read generation
 					_ = c.statsGen.Load()
 				}
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 			}
 		}(i)
 	}
@@ -414,5 +403,116 @@ func TestStatsGenConcurrency(t *testing.T) {
 	expectedGen := uint64(numGoroutines * 10) // Each goroutine increments 10 times
 	if finalGen != expectedGen {
 		t.Errorf("Expected generation %d, got %d", expectedGen, finalGen)
+	}
+}
+
+// TestContainerAppendLogLimit tests that log buffer respects the limit.
+func TestContainerAppendLogLimit(t *testing.T) {
+	c := &Container{
+		ID: "test-container",
+	}
+
+	// Append more than maxLogLines
+	for i := 0; i < maxLogLines+500; i++ {
+		c.AppendLog("log line")
+	}
+
+	logCount := c.LogsLen()
+	if logCount > maxLogLines {
+		t.Errorf("Expected at most %d logs, got %d", maxLogLines, logCount)
+	}
+}
+
+// TestContainerDelete tests that Delete properly cleans up resources.
+func TestContainerDelete(t *testing.T) {
+	ctx := context.Background()
+	childCtx, cancel := context.WithCancel(ctx)
+
+	c := &Container{
+		ID:     "test-container",
+		cancel: cancel,
+		logs:   []string{"log1", "log2"},
+	}
+
+	c.Delete()
+
+	// Verify context was cancelled
+	select {
+	case <-childCtx.Done():
+		// Expected
+	default:
+		t.Error("Expected context to be cancelled after Delete()")
+	}
+
+	// Verify logs were cleared
+	if c.LogsLen() != 0 {
+		t.Errorf("Expected 0 logs after Delete(), got %d", c.LogsLen())
+	}
+}
+
+// TestDockerAddRemoveContainer tests add and remove operations.
+func TestDockerAddRemoveContainer(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := &Docker{
+		containers:    make(map[model.ContainerID]*Container),
+		logger:        logger,
+		statsContexts: make(map[model.ContainerID]context.CancelFunc),
+		logContexts:   make(map[model.ContainerID]context.CancelFunc),
+	}
+
+	containerID := model.ContainerID("test-container-1")
+	c := &Container{
+		ID:      containerID,
+		Service: "test-service",
+	}
+
+	// Add container
+	d.addContainer(ctx, c)
+
+	// Verify it was added
+	retrieved := d.getContainer(ctx, containerID)
+	if retrieved == nil {
+		t.Fatal("Expected to find container after adding")
+	}
+	if retrieved.ID != containerID {
+		t.Errorf("Expected container ID %s, got %s", containerID, retrieved.ID)
+	}
+
+	// Remove container
+	d.removeContainer(ctx, containerID)
+
+	// Verify it was removed
+	retrieved = d.getContainer(ctx, containerID)
+	if retrieved != nil {
+		t.Error("Expected container to be nil after removal")
+	}
+}
+
+// TestContainerStatusFromAction tests status mapping from Docker events.
+func TestContainerStatusFromAction(t *testing.T) {
+	tests := []struct {
+		action   events.Action
+		expected string
+	}{
+		{events.ActionStart, model.StatusRunning},
+		{events.ActionUnPause, model.StatusRunning},
+		{events.ActionStop, model.StatusExited},
+		{events.ActionDie, model.StatusExited},
+		{events.ActionPause, model.StatusPaused},
+		{events.ActionRestart, model.StatusRestarting},
+		{events.ActionCreate, model.StatusCreated},
+		{events.ActionRemove, model.StatusRemoving},
+		{events.Action("unknown"), ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.action), func(t *testing.T) {
+			result := statusFromAction(tt.action)
+			if result != tt.expected {
+				t.Errorf("statusFromAction(%s) = %s, want %s", tt.action, result, tt.expected)
+			}
+		})
 	}
 }

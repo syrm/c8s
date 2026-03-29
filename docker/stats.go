@@ -90,7 +90,8 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	// Create a dedicated context for stats collection using parentCtx.
 	// Using parentCtx instead of ctx (errCtx) prevents cascading cancellations
 	// when other errgroup goroutines fail.
-	statsCtx, statsCancel := context.WithCancel(d.parentCtx)
+	// Use getParentCtx() for thread-safe access.
+	statsCtx, statsCancel := context.WithCancel(d.getParentCtx())
 
 	d.statsContextsLock.Lock()
 	d.statsContexts[c.ID] = statsCancel
