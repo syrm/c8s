@@ -2,295 +2,241 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"maps"
-	"os"
-	"slices"
-	"strings"
 	"sync"
-	"time"
-
-	"github.com/syrm/c8s/dto"
+	"sync/atomic"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/syrm/c8s/internal/model"
 )
 
-type currentView int
-
-const (
-	viewProjectList currentView = iota
-	viewProject
-)
-
-type RequestData interface {
-	isRequestData()
-}
-
-type RequestProjectList struct {
-	Response chan []dto.Project
-}
-
-func (p *RequestProjectList) isRequestData() {}
-
-type RequestProject struct {
-	ProjectID dto.ProjectID
-	Response  chan []dto.Container
-}
-
-func (p *RequestProject) isRequestData() {}
-
+// Tui manages the terminal user interface.
 type Tui struct {
-	app                    *tview.Application
-	tableProject           *tview.Table
-	tableProjectData       map[dto.ProjectID]dto.Project
-	tableProjectDataLock   sync.RWMutex
-	tableContainer         *tview.Table
-	tableContainerData     map[dto.ContainerID]dto.Container
-	tableContainerDataLock sync.RWMutex
-	currentView            currentView
-	currentViewLock        sync.RWMutex
-	currentIDTargeted      string
-	requestData            chan RequestData
-	logger                 *slog.Logger
+	app    *tview.Application
+	pages  *tview.Pages
+	header *tview.TextView
+	status *StatusBar
+	logger *slog.Logger
+
+	// Views
+	projectView   ProjectView
+	containerView ContainerView
+	logView       LogViewState
+
+	// Navigation
+	nav NavigationState
+
+	// Refresh control
+	projectRefresh   PausableRefresh
+	containerRefresh PausableRefresh
+
+	// Modals
+	disappearedModal *tview.Modal
+	helpModal        *tview.Grid
+	helpTextView     *tview.TextView
+
+	// Communication
+	requestData chan model.RequestData
+
+	// Actions
+	actions *ActionController
+
+	// Screen width
+	tableWidth atomic.Int32
+
+	// Lifecycle
+	dataWG    sync.WaitGroup
+	closing   atomic.Bool
+	closeOnce sync.Once
 }
 
 func NewTui(logger *slog.Logger) *Tui {
-	tview.Borders.HorizontalFocus = tview.BoxDrawingsLightHorizontal
-	tview.Borders.VerticalFocus = tview.BoxDrawingsLightVertical
-	tview.Borders.TopLeftFocus = tview.BoxDrawingsLightDownAndRight
-	tview.Borders.TopRightFocus = tview.BoxDrawingsLightDownAndLeft
-	tview.Borders.BottomLeftFocus = tview.BoxDrawingsLightUpAndRight
-	tview.Borders.BottomRightFocus = tview.BoxDrawingsLightUpAndLeft
+	setupStyles()
 
 	app := tview.NewApplication()
 
-	tableProject := tview.NewTable().SetSelectable(true, false)
-	tableProject.SetBorder(true)
+	// Create tables
+	tableProject := createTable()
+	tableProject.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorNavy).
+		Foreground(tcell.ColorBlack).
+		Bold(true))
 
-	tableContainer := tview.NewTable().SetSelectable(true, false)
-	tableContainer.SetBorder(true)
+	tableContainer := createTable()
+
+	// Create status bar
+	status := NewStatusBar()
+
+	// Create log view
+	logView := tview.NewTextView()
+	logView.SetScrollable(true)
+	logView.SetWordWrap(true)
+	logView.SetBorder(true).SetBorderColor(tcell.ColorNavy)
+	logView.SetDynamicColors(true)
+	logView.SetBackgroundColor(tcell.ColorBlack)
+	logView.SetTextColor(tcell.ColorWhite)
+
+	// Create modal
+	disappearedModal := tview.NewModal().
+		SetText("").
+		AddButtons([]string{"OK"}).
+		SetBackgroundColor(tcell.ColorBlack).
+		SetTextColor(tcell.ColorWhite).
+		SetButtonBackgroundColor(tcell.ColorDarkCyan).
+		SetButtonTextColor(tcell.ColorWhite)
+
+	// Create help modal
+	helpText := `                 [cyan::b]Keyboard Shortcuts[-::-]
+
+  [cyan]Filtering:[-]
+    /    Activate filter     c    Clear filter
+
+  [cyan]Containers list:[-]
+    r    Start/Restart       x    Stop
+    d    Remove container    s    Open shell
+
+  [cyan]Container logs:[-]
+    p    Pause/unpause       t    Toggle timestamps`
+
+	helpTextView := tview.NewTextView()
+	helpTextView.SetText(helpText)
+	helpTextView.SetTextAlign(tview.AlignLeft)
+	helpTextView.SetDynamicColors(true)
+	helpTextView.SetBackgroundColor(tcell.ColorBlack)
+	helpTextView.SetBorder(true)
+	helpTextView.SetBorderColor(tcell.ColorDarkCyan)
+	helpTextView.SetBorderPadding(1, 1, 2, 2)
+
+	helpModal := tview.NewGrid().
+		SetColumns(0, 59, 0).
+		SetRows(0, 18, 0).
+		AddItem(helpTextView, 1, 1, 1, 1, 0, 0, true)
+
+	// Create header view
+	headerView := tview.NewTextView()
+	headerView.SetDynamicColors(true)
+	headerView.SetBackgroundColor(tcell.ColorBlack)
+	headerView.SetTextAlign(tview.AlignLeft)
+	headerView.SetText(" [white::b]c8s[-::]")
+
+	// Create layouts
+	projectLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(headerView, 1, 0, false).
+		AddItem(tableProject, 0, 1, true)
+
+	containerLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(headerView, 1, 0, false).
+		AddItem(tableContainer, 0, 1, true)
+
+	logLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(headerView, 1, 0, false).
+		AddItem(logView, 0, 1, true)
+
+	// Create search states
+	projectSearch := NewSearchState()
+	containerSearch := NewSearchState()
+	logFilterInput := createSearchInput()
+
+	pages := tview.NewPages()
 
 	tui := &Tui{
-		app:                app,
-		logger:             logger,
-		tableProject:       tableProject,
-		tableProjectData:   make(map[dto.ProjectID]dto.Project),
-		tableContainer:     tableContainer,
-		tableContainerData: make(map[dto.ContainerID]dto.Container),
-		requestData:        make(chan RequestData),
-		currentView:        viewProjectList,
+		app:    app,
+		pages:  pages,
+		logger: logger,
+		header: headerView,
+		status: status,
+
+		projectView: ProjectView{
+			Table:  tableProject,
+			Layout: projectLayout,
+			Search: projectSearch,
+		},
+		containerView: ContainerView{
+			Table:  tableContainer,
+			Layout: containerLayout,
+			Search: containerSearch,
+		},
+		logView: LogViewState{
+			View:        logView,
+			Layout:      logLayout,
+			FilterInput: logFilterInput,
+		},
+
+		disappearedModal: disappearedModal,
+		helpModal:        helpModal,
+		helpTextView:     helpTextView,
+
+		requestData: make(chan model.RequestData),
+		actions:     NewActionController(maxConcurrentActions),
 	}
 
-	tableProject.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyRight {
-			rowIndex, _ := tableProject.GetSelection()
-			tui.tableProjectDataLock.RLock()
-			for _, project := range tui.tableProjectData {
-				if project.Name == tableProject.GetCell(rowIndex, 0).Text {
-					tui.currentIDTargeted = string(project.ID)
-					tui.currentViewLock.Lock()
-					tui.currentView = viewProject
-					tui.currentViewLock.Unlock()
-					break
-				}
-			}
-			tui.tableProjectDataLock.RUnlock()
-			tui.tableContainer.Clear()
-			tui.drawContainers()
-			tui.app.SetRoot(tui.tableContainer, true)
-		}
+	// Set default sort
+	tui.projectView.Sort.Set(projectSortCPU, false)
+	tui.containerView.Sort.Set(containerSortCPU, false)
 
-		return event
+	// Set status bar layout
+	status.SetLayout(containerLayout)
+
+	// Add pages
+	pages.AddPage("projectList", projectLayout, true, true)
+	pages.AddPage("containerList", containerLayout, true, false)
+	pages.AddPage("logs", logLayout, true, false)
+	pages.AddPage("modal", disappearedModal, false, false)
+	pages.AddPage("help", helpModal, true, false)
+
+	// Hook to update column widths on resize
+	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		screenWidth, _ := screen.Size()
+		tui.tableWidth.Store(int32(screenWidth - 2))
+		return false
 	})
 
-	tableContainer.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEsc || event.Key() == tcell.KeyLeft {
-			tui.app.SetRoot(tui.tableProject, true)
-			tui.currentViewLock.Lock()
-			tui.currentView = viewProjectList
-			tui.currentViewLock.Unlock()
-			tui.currentIDTargeted = ""
-		}
-
-		return event
-	})
+	// Setup handlers and callbacks
+	tui.setupProjectTableHandler()
+	tui.setupContainerTableHandler()
+	tui.setupLogViewHandler()
+	tui.setupSearchCallbacks()
+	tui.setupModalCallbacks()
 
 	return tui
 }
 
-func (t *Tui) RenderProjectHeader() {
-	t.tableProject.SetCell(0, 0, tview.NewTableCell("[::b]Project").SetAlign(tview.AlignCenter).SetExpansion(3).SetSelectable(false))
-	t.tableProject.SetCell(0, 1, tview.NewTableCell("[::b]CPU").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableProject.SetCell(0, 2, tview.NewTableCell("[::b]Memory").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableProject.SetCell(0, 3, tview.NewTableCell("[::b]Cont.").SetAlign(tview.AlignRight).SetExpansion(2).SetSelectable(false))
-	t.tableProject.SetFixed(1, 0)
-}
+func (t *Tui) Render(ctx context.Context) error {
+	// Initialize ActionController with parent context
+	t.actions.Start(ctx)
 
-func (t *Tui) RenderContainerHeader(project string) {
-	t.tableContainer.SetCell(0, 0, tview.NewTableCell("[::b]"+project+" container").SetAlign(tview.AlignCenter).SetExpansion(2).SetSelectable(false))
-	t.tableContainer.SetCell(0, 1, tview.NewTableCell("[::b]CPU").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableContainer.SetCell(0, 2, tview.NewTableCell("[::b]Memory").SetAlign(tview.AlignRight).SetExpansion(2).SetMaxWidth(7).SetSelectable(false))
-	t.tableContainer.SetFixed(1, 0)
-}
+	t.dataWG.Add(1)
+	go func() {
+		defer t.dataWG.Done()
+		t.getData(ctx)
+	}()
 
-func (t *Tui) drawProjects() {
-	projects := slices.Collect(maps.Values(t.tableProjectData))
-
-	slices.SortStableFunc(projects, func(a, b dto.Project) int {
-		if a.CPUPercentage < b.CPUPercentage {
-			return 1
-		}
-
-		if a.CPUPercentage > b.CPUPercentage {
-			return -1
-		}
-
-		return strings.Compare(a.Name, b.Name)
-	})
-
-	t.tableProject.Clear()
-	t.RenderProjectHeader()
-	offset := 0
-	for index, project := range projects {
-		t.tableProject.SetCell(index+1+offset, 0, tview.NewTableCell(project.Name))
-		t.tableProject.SetCell(
-			index+1+offset,
-			1,
-			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", max(0, project.CPUPercentage)),
-			).
-				SetAlign(tview.AlignRight),
-		)
-		t.tableProject.SetCell(
-			index+1+offset,
-			2,
-			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", max(0, project.MemoryPercentage)),
-			).
-				SetAlign(tview.AlignRight),
-		)
-		t.tableProject.SetCell(
-			index+1+offset,
-			3,
-			tview.NewTableCell(
-				fmt.Sprintf("%d/%d", project.ContainersRunning, len(project.ContainersState)),
-			).
-				SetAlign(tview.AlignRight),
-		)
-	}
-}
-
-func (t *Tui) drawContainers() {
-	t.tableContainerDataLock.RLock()
-	containers := slices.SortedStableFunc(maps.Values(t.tableContainerData), func(a, b dto.Container) int {
-		if a.CPUPercentage < b.CPUPercentage {
-			return 1
-		}
-
-		if a.CPUPercentage > b.CPUPercentage {
-			return -1
-		}
-
-		return strings.Compare(a.Name, b.Name)
-	})
-	t.tableContainerDataLock.RUnlock()
-
-	t.tableContainer.Clear()
-	t.tableProjectDataLock.RLock()
-	t.RenderContainerHeader(t.tableProjectData[dto.ProjectID(t.currentIDTargeted)].Name)
-	t.tableProjectDataLock.RUnlock()
-	index := 0
-	for _, container := range containers {
-		if string(container.Project.ID) != t.currentIDTargeted {
-			continue
-		}
-		index += 1
-
-		t.tableContainer.SetCell(index, 0, tview.NewTableCell(container.Service))
-		t.tableContainer.SetCell(
-			index,
-			1,
-			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", container.CPUPercentage),
-			).
-				SetAlign(tview.AlignRight),
-		)
-		t.tableContainer.SetCell(
-			index,
-			2,
-			tview.NewTableCell(
-				fmt.Sprintf("%.2f%%", container.MemoryPercentage),
-			).
-				SetAlign(tview.AlignRight),
-		)
-	}
-}
-
-func (t *Tui) GetRequestData() <-chan RequestData {
-	return t.requestData
-}
-
-func (t *Tui) getData(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case <-ticker.C:
-			t.currentViewLock.RLock()
-			cv := t.currentView
-			t.currentViewLock.RUnlock()
-			switch cv {
-			case viewProjectList:
-				response := make(chan []dto.Project)
-				t.requestData <- &RequestProjectList{
-					Response: response,
-				}
-
-				projects := <-response
-				t.tableProjectDataLock.Lock()
-				t.tableProjectData = make(map[dto.ProjectID]dto.Project)
-				for _, p := range projects {
-					t.tableProjectData[p.ID] = p
-				}
-				t.tableProjectDataLock.Unlock()
-
-				t.app.QueueUpdateDraw(func() {
-					t.drawProjects()
-				})
-			case viewProject:
-				response := make(chan []dto.Container)
-				t.requestData <- &RequestProject{
-					ProjectID: dto.ProjectID(t.currentIDTargeted),
-					Response:  response,
-				}
-
-				containers := <-response
-				t.tableContainerDataLock.Lock()
-				t.tableContainerData = make(map[dto.ContainerID]dto.Container)
-				for _, c := range containers {
-					t.tableContainerData[c.ID] = c
-				}
-				t.tableContainerDataLock.Unlock()
-
-				t.app.QueueUpdateDraw(func() {
-					t.drawContainers()
-				})
-			}
-		}
-	}
-}
-
-func (t *Tui) Render(ctx context.Context) {
-	go t.getData(ctx)
-
-	if err := t.app.SetRoot(t.tableProject, true).EnableMouse(true).Run(); err != nil {
+	if err := t.app.SetRoot(t.pages, true).EnableMouse(true).Run(); err != nil {
 		t.logger.ErrorContext(ctx, "error rendering tui", slog.Any("error", err.Error()))
-		os.Exit(1)
+		t.dataWG.Wait()
+		return err
 	}
+
+	t.cleanup()
+	return nil
+}
+
+func (t *Tui) cleanup() {
+	t.closing.Store(true)
+
+	t.actions.Cancel()
+	t.actions.Wait()
+
+	t.dataWG.Wait()
+
+	t.status.Stop()
+	t.containerRefresh.Stop()
+	t.projectRefresh.Stop()
+
+	// Use sync.Once to ensure channel is closed exactly once
+	t.closeOnce.Do(func() {
+		close(t.requestData)
+	})
 }
