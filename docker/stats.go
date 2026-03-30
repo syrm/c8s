@@ -15,7 +15,7 @@ import (
 )
 
 func (d *Docker) collectContainers(ctx context.Context) error {
-	listCtx, cancel := context.WithTimeout(ctx, dockerAPITimeout)
+	listCtx, cancel := context.WithTimeout(ctx, d.cfg.DockerTimeout)
 	defer cancel()
 
 	dockerContainers, err := d.client.ContainerList(listCtx, apiContainer.ListOptions{All: true})
@@ -70,22 +70,21 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 	}
 
 	// Check if container already exists
-	c := d.getContainer(ctx, model.ContainerID(dockerContainer.ID))
+	c := d.getContainer(model.ContainerID(dockerContainer.ID))
 	if c != nil {
 		// Container already exists
 		return
 	}
 
-	c = NewContainer(ctx, dockerContainer, action, project)
-	if c == nil {
-		// Context was cancelled, don't create container
+	c, err := NewContainer(ctx, dockerContainer, action, project, d.cfg.MaxLogLines)
+	if err != nil {
+		// Context was cancelled or container creation failed
+		slog.DebugContext(ctx, "failed to create container", slog.Any("error", err))
 		return
 	}
 
 	// Add container to map
-	if !d.addContainer(ctx, c) {
-		return
-	}
+	d.addContainer(c)
 
 	// Create a dedicated context for stats collection using parentCtx.
 	// Using parentCtx instead of ctx (errCtx) prevents cascading cancellations

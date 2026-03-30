@@ -5,21 +5,31 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sync"
+	"regexp"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/syrm/c8s/internal/model"
-	itimer "github.com/syrm/c8s/internal/timer"
 )
 
-// containerStatusFilter defines which container statuses are allowed for an action.
-type containerStatusFilter int
+// validShellPattern is pre-compiled for performance.
+var validShellPattern = regexp.MustCompile(`^[a-zA-Z0-9/_-]+$`)
 
-const (
-	filterRunning    containerStatusFilter = iota // Only running containers
-	filterNotRunning                              // Only non-running containers
-	filterAny                                     // Any status
-)
+// dockerBin is the resolved absolute path to the docker binary.
+var dockerBin = resolveDockerBin()
+
+func resolveDockerBin() string {
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		return "docker"
+	}
+	return path
+}
+
+const defaultShell = "/bin/sh"
+
+var preferredShells = []string{"/bin/bash", "/bin/sh", "/bin/ash"}
 
 // isValidContainerID validates that a container ID has the expected Docker format.
 func isValidContainerID(id string) bool {
@@ -34,284 +44,75 @@ func isValidContainerID(id string) bool {
 	return true
 }
 
-// getSelectedContainer returns the container at the selected row, filtered by status.
-func (t *Tui) getSelectedContainer(rowIndex int, filter containerStatusFilter) *model.Container {
-	if rowIndex <= 0 {
-		return nil
-	}
-
-	cell := t.containerView.Table.GetCell(rowIndex, 0)
-	if cell == nil {
-		return nil
-	}
-	cellText := stripWarningPrefix(cell.Text)
-
-	containers := t.containerView.Values()
-	for _, container := range containers {
-		if cellText != container.Service {
-			continue
-		}
-
-		switch filter {
-		case filterRunning:
-			if container.Status != model.StatusRunning {
-				continue
-			}
-		case filterNotRunning:
-			if container.Status == model.StatusRunning {
-				continue
-			}
-		}
-
-		c := container
-		return &c
-	}
-	return nil
-}
-
-// setPendingAction sends a request to set a pending action on a container.
-func (t *Tui) setPendingAction(containerID model.ContainerID, action string) {
-	response := make(chan bool, 1)
-	if !t.sendRequest(&model.RequestSetPendingAction{
-		ContainerID:   containerID,
-		PendingAction: action,
-		Response:      response,
-	}) {
-		return
-	}
-
-	timer := time.NewTimer(channelTimeout)
-	defer itimer.Stop(timer)
-
-	select {
-	case <-response:
-	case <-timer.C:
-	}
-}
-
-// updateLocalCache updates the local container cache with a pending action.
-func (t *Tui) updateLocalCache(containerID model.ContainerID, action string) {
-	if c, ok := t.containerView.Get(containerID); ok {
-		c.PendingAction = action
-		t.containerView.Set(containerID, c)
-	}
-}
-
-// handleContainerShell opens an interactive shell in the selected container.
-func (t *Tui) handleContainerShell() bool {
-	rowIndex, _ := t.containerView.Table.GetSelection()
-	container := t.getSelectedContainer(rowIndex, filterRunning)
-	if container == nil {
+// isValidShell validates that a shell path is safe.
+func isValidShell(shell string) bool {
+	if shell == "" {
 		return false
 	}
-
-	if !isValidContainerID(string(container.ID)) {
-		t.showStatusMessage("Invalid container ID")
-		return false
+	validShells := map[string]bool{
+		"/bin/sh": true, "/bin/bash": true, "/bin/zsh": true,
+		"/bin/ash": true, "/bin/fish": true, "/usr/bin/sh": true,
+		"/usr/bin/bash": true, "/usr/bin/zsh": true, "/usr/bin/ash": true,
+		"/usr/bin/fish": true, "sh": true, "bash": true,
+		"zsh": true, "ash": true, "fish": true,
 	}
-
-	shell := findAvailableShell(string(container.ID))
-
-	var shellErr error
-	t.app.Suspend(func() {
-		cmd := exec.Command("docker", "exec", "-it", string(container.ID), shell)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		shellErr = cmd.Run()
-	})
-
-	if shellErr != nil {
-		t.app.QueueUpdateDraw(func() {
-			t.showStatusMessage(fmt.Sprintf("Shell exited with error: %v", shellErr))
-		})
+	if validShells[shell] {
+		return true
 	}
-	return true
+	return validShellPattern.MatchString(shell)
 }
 
 // findAvailableShell checks which shells are available in the container.
 func findAvailableShell(containerID string) string {
 	for _, shell := range preferredShells {
-		cmd := exec.Command("docker", "exec", containerID, "test", "-x", shell)
+		if !isValidShell(shell) {
+			continue
+		}
+		cmd := exec.Command(dockerBin, "exec", containerID, "test", "-x", shell)
 		if cmd.Run() == nil {
 			return shell
 		}
 	}
-	return defaultShell
-}
-
-// containerActionParams defines the parameters for a container action.
-type containerActionParams struct {
-	pendingAction string
-	dockerCmd     string
-	timeoutMsg    string
-	errorMsg      string
-}
-
-// runContainerAction runs a docker command on a container asynchronously.
-// The container must already be validated before calling this function.
-func (t *Tui) runContainerAction(container *model.Container, params containerActionParams) bool {
-	if !t.actions.TryAcquire() {
-		t.showStatusMessage("Too many pending actions, please wait")
-		return false
+	if isValidShell(defaultShell) {
+		return defaultShell
 	}
+	return "sh"
+}
 
-	t.setPendingAction(container.ID, params.pendingAction)
-	t.updateLocalCache(container.ID, params.pendingAction)
-	t.drawContainers()
+// shellCmd opens an interactive shell in a container using tea.ExecProcess.
+func shellCmd(containerID string) tea.Cmd {
+	shell := findAvailableShell(containerID)
+	c := exec.Command(dockerBin, "exec", "-it", containerID, shell)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return shellFinishedMsg{err: err}
+	})
+}
 
-	containerID := string(container.ID)
-	t.actions.Add(1)
-	go func() {
-		defer t.actions.Done()
-		defer t.actions.Release()
-
-		ctx, cancel := context.WithTimeout(t.actions.Context(), 30*time.Second)
+// containerActionCmd runs a docker command on a container asynchronously.
+func containerActionCmd(containerID, dockerCmd, timeoutMsg, errorMsg string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "docker", params.dockerCmd, containerID)
+		cmd := exec.CommandContext(ctx, dockerBin, dockerCmd, containerID)
 		if err := cmd.Run(); err != nil {
-			t.app.QueueUpdateDraw(func() {
-				if ctx.Err() == context.DeadlineExceeded {
-					t.showStatusMessage(params.timeoutMsg)
-				} else {
-					t.showStatusMessage(fmt.Sprintf(params.errorMsg, err))
-				}
-			})
+			if ctx.Err() == context.DeadlineExceeded {
+				return actionResultMsg{err: err, message: timeoutMsg}
+			}
+			return actionResultMsg{err: err, message: fmt.Sprintf(errorMsg, err)}
 		}
-	}()
-	return true
+		return actionResultMsg{}
+	}
 }
 
-// validateAndGetContainer gets and validates a container for an action.
-func (t *Tui) validateAndGetContainer(filter containerStatusFilter) *model.Container {
-	rowIndex, _ := t.containerView.Table.GetSelection()
-	container := t.getSelectedContainer(rowIndex, filter)
-	if container == nil {
+// getSelectedContainer returns the container at the given cursor index.
+func getSelectedContainer(containers []model.Container, cursor int) *model.Container {
+	if cursor < 0 || cursor >= len(containers) {
 		return nil
 	}
-
-	if !isValidContainerID(string(container.ID)) {
-		t.showStatusMessage("Invalid container ID")
-		return nil
-	}
-
-	return container
-}
-
-// handleContainerStop stops the selected running container.
-func (t *Tui) handleContainerStop() bool {
-	container := t.validateAndGetContainer(filterRunning)
-	if container == nil {
-		return false
-	}
-	return t.runContainerAction(container, containerActionParams{
-		pendingAction: actionStopping,
-		dockerCmd:     "stop",
-		timeoutMsg:    "Stop container timed out",
-		errorMsg:      "Failed to stop container: %v",
-	})
-}
-
-// handleContainerRestart restarts a running container or starts a stopped one.
-func (t *Tui) handleContainerRestart() bool {
-	container := t.validateAndGetContainer(filterAny)
-	if container == nil {
-		return false
-	}
-
-	if container.Status == model.StatusRunning {
-		return t.runContainerAction(container, containerActionParams{
-			pendingAction: actionRestarting,
-			dockerCmd:     "restart",
-			timeoutMsg:    "Restart container timed out",
-			errorMsg:      "Failed to restart container: %v",
-		})
-	}
-	return t.runContainerAction(container, containerActionParams{
-		pendingAction: actionStarting,
-		dockerCmd:     "start",
-		timeoutMsg:    "Start container timed out",
-		errorMsg:      "Failed to start container: %v",
-	})
-}
-
-// handleContainerRemove removes the selected stopped container.
-func (t *Tui) handleContainerRemove() bool {
-	container := t.validateAndGetContainer(filterNotRunning)
-	if container == nil {
-		return false
-	}
-	return t.runContainerAction(container, containerActionParams{
-		pendingAction: actionRemoving,
-		dockerCmd:     "rm",
-		timeoutMsg:    "Remove container timed out",
-		errorMsg:      "Failed to remove container: %v",
-	})
-}
-
-// ActionController manages container action goroutines.
-type ActionController struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.Mutex
-	wg            sync.WaitGroup
-	sem           chan struct{}
-	maxConcurrent int
-}
-
-// NewActionController creates a new ActionController with placeholder context.
-// Call Start(ctx) to initialize with a proper parent context.
-func NewActionController(maxConcurrent int) *ActionController {
-	return &ActionController{
-		ctx:           context.Background(), // Placeholder until Start() is called
-		sem:           make(chan struct{}, maxConcurrent),
-		maxConcurrent: maxConcurrent,
-	}
-}
-
-// Start initializes the ActionController with a parent context.
-// This should be called before using the controller.
-func (a *ActionController) Start(parent context.Context) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.ctx, a.cancel = context.WithCancel(parent)
-}
-
-func (a *ActionController) Context() context.Context {
-	return a.ctx
-}
-
-func (a *ActionController) TryAcquire() bool {
-	select {
-	case a.sem <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
-
-func (a *ActionController) Release() {
-	<-a.sem
-}
-
-func (a *ActionController) Add(delta int) {
-	a.wg.Add(delta)
-}
-
-func (a *ActionController) Done() {
-	a.wg.Done()
-}
-
-func (a *ActionController) Cancel() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.cancel != nil {
-		a.cancel()
-		a.cancel = nil
-	}
-}
-
-func (a *ActionController) Wait() {
-	a.wg.Wait()
+	c := containers[cursor]
+	return &c
 }

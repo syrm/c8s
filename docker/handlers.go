@@ -48,14 +48,14 @@ func (d *Docker) handleRequests(ctx context.Context) {
 }
 
 func (d *Docker) handleRequestContainerLog(ctx context.Context, r *model.RequestContainerLog) {
-	c := d.getContainer(ctx, r.ContainerID)
+	c := d.getContainer(r.ContainerID)
 	if c == nil {
 		r.Response <- model.Container{}
 		return
 	}
 
 	snap := c.Snapshot()
-	
+
 	// Check and set log collection flag atomically
 	c.mu.Lock()
 	needStart := !c.LogCollectionActive
@@ -72,7 +72,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *model.Request
 }
 
 func (d *Docker) handleRequestContainerProject(ctx context.Context, r *model.RequestProject) {
-	containers := d.getContainersList(ctx, func(c *Container) bool {
+	containers := d.getContainersList(func(c *Container) bool {
 		return r.ProjectID == c.Project.ID
 	})
 
@@ -85,7 +85,7 @@ func (d *Docker) handleRequestContainerProject(ctx context.Context, r *model.Req
 }
 
 func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *model.RequestSetPendingAction) {
-	c := d.getContainer(ctx, r.ContainerID)
+	c := d.getContainer(r.ContainerID)
 	if c == nil {
 		r.Response <- false
 		return
@@ -96,7 +96,7 @@ func (d *Docker) handleRequestSetPendingAction(ctx context.Context, r *model.Req
 }
 
 func (d *Docker) handleRequestProjectList(ctx context.Context, r *model.RequestProjectList) {
-	containers := d.getContainersList(ctx, nil)
+	containers := d.getContainersList(nil)
 	projects := make(map[model.ProjectID]model.Project)
 
 	for _, c := range containers {
@@ -142,6 +142,19 @@ func (d *Docker) handleRequestStopLogCollection(ctx context.Context, r *model.Re
 		cancel()
 		delete(d.logContexts, r.ContainerID)
 		d.logger.DebugContext(ctx, "stopped log collection", slog.String("container_id", string(r.ContainerID)))
+	}
+}
+
+// stopStatsCollection stops stats collection for a container.
+// This function ensures the stats goroutine is properly cancelled and cleaned up.
+func (d *Docker) stopStatsCollection(containerID model.ContainerID) {
+	d.statsContextsLock.Lock()
+	defer d.statsContextsLock.Unlock()
+
+	if cancel, exists := d.statsContexts[containerID]; exists {
+		cancel()
+		delete(d.statsContexts, containerID)
+		d.logger.Debug("stopped stats collection", slog.String("container_id", string(containerID)))
 	}
 }
 

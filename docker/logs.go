@@ -54,7 +54,7 @@ func (d *Docker) cleanupLogContext(containerID model.ContainerID) {
 
 // openLogStream opens a log stream for a container.
 func (d *Docker) openLogStream(ctx context.Context, c *Container) (io.ReadCloser, error) {
-	since := time.Now().Add(-logHistoryDuration).Format(time.RFC3339)
+	since := time.Now().Add(-d.cfg.LogHistory).Format(time.RFC3339)
 	out, err := d.client.ContainerLogs(ctx, string(c.ID), apiContainer.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,

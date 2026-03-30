@@ -116,7 +116,8 @@ func createTestContainerSummary(id, name, projectID, projectName string) apiCont
 // TestContainersConcurrentAccess tests that multiple goroutines can safely
 // access containers map via mutex-protected methods without race conditions.
 func TestContainersConcurrentAccess(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Parallel()
+	_, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -147,10 +148,10 @@ func TestContainersConcurrentAccess(t *testing.T) {
 					c := &Container{
 						ID: containerID,
 					}
-					d.addContainer(ctx, c)
+					d.addContainer(c)
 				} else {
 					// Get container
-					d.getContainer(ctx, containerID)
+					d.getContainer(containerID)
 				}
 			}
 		}(i)
@@ -161,7 +162,8 @@ func TestContainersConcurrentAccess(t *testing.T) {
 
 // TestGetContainersListConcurrency tests concurrent access to container list retrieval.
 func TestGetContainersListConcurrency(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Parallel()
+	_, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -192,7 +194,7 @@ func TestGetContainersListConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
-				containers := d.getContainersList(ctx, nil)
+				containers := d.getContainersList(nil)
 				// Verify we get results without panicking
 				if len(containers) == 0 {
 					// Initial state may have containers, but race may cause empty slice
@@ -207,6 +209,7 @@ func TestGetContainersListConcurrency(t *testing.T) {
 
 // TestChannelHelpersConcurrency tests the channel helper functions under concurrent load.
 func TestChannelHelpersConcurrency(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -254,6 +257,7 @@ func TestChannelHelpersConcurrency(t *testing.T) {
 
 // TestContainerSnapshotConcurrency tests concurrent access to container snapshot.
 func TestContainerSnapshotConcurrency(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -310,6 +314,7 @@ func TestContainerSnapshotConcurrency(t *testing.T) {
 
 // TestLogCollectionFlagConcurrency tests that LogCollectionActive flag is properly handled.
 func TestLogCollectionFlagConcurrency(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -363,6 +368,7 @@ func TestLogCollectionFlagConcurrency(t *testing.T) {
 
 // TestStatsGenConcurrency tests that statsGen atomic operations work correctly.
 func TestStatsGenConcurrency(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -408,23 +414,27 @@ func TestStatsGenConcurrency(t *testing.T) {
 
 // TestContainerAppendLogLimit tests that log buffer respects the limit.
 func TestContainerAppendLogLimit(t *testing.T) {
+	t.Parallel()
+	const testMaxLogLines = 1000
 	c := &Container{
-		ID: "test-container",
+		ID:          "test-container",
+		maxLogLines: testMaxLogLines,
 	}
 
 	// Append more than maxLogLines
-	for i := 0; i < maxLogLines+500; i++ {
+	for i := 0; i < testMaxLogLines+500; i++ {
 		c.AppendLog("log line")
 	}
 
 	logCount := c.LogsLen()
-	if logCount > maxLogLines {
-		t.Errorf("Expected at most %d logs, got %d", maxLogLines, logCount)
+	if logCount > testMaxLogLines {
+		t.Errorf("Expected at most %d logs, got %d", testMaxLogLines, logCount)
 	}
 }
 
 // TestContainerDelete tests that Delete properly cleans up resources.
 func TestContainerDelete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	childCtx, cancel := context.WithCancel(ctx)
 
@@ -452,7 +462,7 @@ func TestContainerDelete(t *testing.T) {
 
 // TestDockerAddRemoveContainer tests add and remove operations.
 func TestDockerAddRemoveContainer(t *testing.T) {
-	ctx := context.Background()
+	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	d := &Docker{
@@ -469,10 +479,10 @@ func TestDockerAddRemoveContainer(t *testing.T) {
 	}
 
 	// Add container
-	d.addContainer(ctx, c)
+	d.addContainer(c)
 
 	// Verify it was added
-	retrieved := d.getContainer(ctx, containerID)
+	retrieved := d.getContainer(containerID)
 	if retrieved == nil {
 		t.Fatal("Expected to find container after adding")
 	}
@@ -481,10 +491,10 @@ func TestDockerAddRemoveContainer(t *testing.T) {
 	}
 
 	// Remove container
-	d.removeContainer(ctx, containerID)
+	d.removeContainer(containerID)
 
 	// Verify it was removed
-	retrieved = d.getContainer(ctx, containerID)
+	retrieved = d.getContainer(containerID)
 	if retrieved != nil {
 		t.Error("Expected container to be nil after removal")
 	}
@@ -492,6 +502,7 @@ func TestDockerAddRemoveContainer(t *testing.T) {
 
 // TestContainerStatusFromAction tests status mapping from Docker events.
 func TestContainerStatusFromAction(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		action   events.Action
 		expected string

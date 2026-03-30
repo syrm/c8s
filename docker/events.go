@@ -96,7 +96,7 @@ func (d *Docker) processEvent(ctx context.Context, msg events.Message) {
 		slog.String("container_id", msg.Actor.ID))
 
 	// Get container from map
-	c := d.getContainer(ctx, model.ContainerID(msg.Actor.ID))
+	c := d.getContainer(model.ContainerID(msg.Actor.ID))
 
 	if c != nil {
 		d.handleExistingContainerEvent(ctx, c, msg)
@@ -126,15 +126,12 @@ func (d *Docker) handleExistingContainerEvent(ctx context.Context, c *Container,
 
 // handleContainerDestroy handles container destruction.
 func (d *Docker) handleContainerDestroy(ctx context.Context, c *Container) {
-	// Cancel the stats goroutine before deleting the container
-	d.statsContextsLock.Lock()
-	if statsCancel, exists := d.statsContexts[c.ID]; exists {
-		statsCancel()
-		delete(d.statsContexts, c.ID)
-	}
-	d.statsContextsLock.Unlock()
+	d.logger.DebugContext(ctx, "handling container destruction", slog.String("container_id", string(c.ID)))
 
-	// Cancel the log collection goroutine before deleting the container
+	// Stop stats collection using the dedicated function
+	d.stopStatsCollection(c.ID)
+
+	// Stop log collection
 	d.logContextsLock.Lock()
 	if logCancel, exists := d.logContexts[c.ID]; exists {
 		logCancel()
@@ -143,8 +140,12 @@ func (d *Docker) handleContainerDestroy(ctx context.Context, c *Container) {
 	d.logContextsLock.Unlock()
 
 	// Remove container from map
-	d.removeContainer(ctx, c.ID)
+	d.removeContainer(c.ID)
+
+	// Cancel container's context and clear resources
 	c.Delete()
+
+	d.logger.DebugContext(ctx, "container destruction completed", slog.String("container_id", string(c.ID)))
 }
 
 // restartStatsCollection restarts stats collection for a container.

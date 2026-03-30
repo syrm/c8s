@@ -3,13 +3,14 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
+
+	"charm.land/lipgloss/v2"
 )
 
 // timestampFormats contains supported formats for parsing log timestamps.
-// Using an array instead of slice to make it clear this is immutable.
 var timestampFormats = [...]string{
 	time.RFC3339Nano,
 	time.RFC3339,
@@ -34,7 +35,6 @@ func getStringField(data map[string]any, keys ...string) string {
 }
 
 // formatJSONLog parses a JSON log line and formats it for display.
-// Returns the formatted line and whether parsing was successful.
 func formatJSONLog(line string, showTimestamp bool) (string, bool) {
 	jsonStart := strings.Index(line, "{")
 	if jsonStart == -1 {
@@ -44,18 +44,15 @@ func formatJSONLog(line string, showTimestamp bool) (string, bool) {
 	dockerTimestamp := strings.TrimSpace(line[:jsonStart])
 	jsonPart := line[jsonStart:]
 
-	// Parse JSON only once into map[string]any
 	var logData map[string]any
 	if err := json.Unmarshal([]byte(jsonPart), &logData); err != nil {
 		return "", false
 	}
 
-	// Extract known fields from the map
 	logTimestamp := getStringField(logData, "time", "timestamp", "ts", "@timestamp", "t")
 	level := strings.ToUpper(getStringField(logData, "level", "lvl", "severity", "loglevel"))
 	msg := getStringField(logData, "msg", "message", "text")
 
-	// Remove known fields to get extras
 	knownFields := []string{
 		"time", "timestamp", "ts", "@timestamp", "t",
 		"level", "lvl", "severity", "loglevel",
@@ -65,50 +62,41 @@ func formatJSONLog(line string, showTimestamp bool) (string, bool) {
 		delete(logData, key)
 	}
 
-	// Collect remaining fields sorted by key
 	var extras []string
 	if len(logData) > 0 {
 		keys := make([]string, 0, len(logData))
 		for k := range logData {
 			keys = append(keys, k)
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 
 		for _, k := range keys {
 			v := logData[k]
 			vStr := fmt.Sprintf("%v", v)
-			vStr = strings.ReplaceAll(vStr, "[", "[[]")
-			extras = append(extras, fmt.Sprintf("[blue]%s[-]=%s", k, vStr))
+			extras = append(extras, logKeyStyle.Render(k)+"="+vStr)
 		}
 	}
 
-	// Build formatted line using strings.Builder for efficiency
 	var builder strings.Builder
 
 	if showTimestamp {
 		if logTimestamp != "" {
 			formattedTs := formatTimestamp(logTimestamp)
-			builder.WriteString("[gray]")
-			builder.WriteString(formattedTs)
-			builder.WriteString("[-] ")
+			builder.WriteString(logTimeStyle.Render(formattedTs))
+			builder.WriteString(" ")
 		} else if dockerTimestamp != "" {
-			builder.WriteString("[gray]")
-			builder.WriteString(dockerTimestamp)
-			builder.WriteString("[-] ")
+			builder.WriteString(logTimeStyle.Render(dockerTimestamp))
+			builder.WriteString(" ")
 		}
 	}
 
 	if level != "" {
-		levelColor := getLevelColor(level)
-		builder.WriteString("[")
-		builder.WriteString(levelColor)
-		builder.WriteString("]")
-		builder.WriteString(fmt.Sprintf("%-5s", level))
-		builder.WriteString("[-] ")
+		style := getLevelStyle(level)
+		builder.WriteString(style.Render(fmt.Sprintf("%-5s", level)))
+		builder.WriteString(" ")
 	}
 
 	if msg != "" {
-		msg = strings.ReplaceAll(msg, "[", "[[]")
 		builder.WriteString(msg)
 	}
 
@@ -119,7 +107,6 @@ func formatJSONLog(line string, showTimestamp bool) (string, bool) {
 		builder.WriteString(strings.Join(extras, " "))
 	}
 
-	builder.WriteString("\n")
 	return builder.String(), true
 }
 
@@ -133,24 +120,23 @@ func formatTimestamp(ts string) string {
 	return ts
 }
 
-// getLevelColor returns the tview color for a log level.
-func getLevelColor(level string) string {
+// getLevelStyle returns the lipgloss style for a log level.
+func getLevelStyle(level string) lipgloss.Style {
 	switch strings.ToUpper(level) {
 	case "ERROR", "ERR", "FATAL", "PANIC", "CRITICAL":
-		return "red"
+		return logErrorStyle
 	case "WARN", "WARNING":
-		return "yellow"
+		return logWarnStyle
 	case "INFO":
-		return "green"
+		return logInfoStyle
 	case "DEBUG", "TRACE":
-		return "gray"
+		return logDebugStyle
 	default:
-		return "white"
+		return lipgloss.NewStyle().Foreground(colorWhite)
 	}
 }
 
 // extractTimestampPrefix tries to extract a timestamp from the beginning of a string.
-// Returns the timestamp, the remaining string, and whether a timestamp was found.
 func extractTimestampPrefix(s string) (timestamp string, rest string, found bool) {
 	if len(s) < 20 {
 		return "", s, false
@@ -194,9 +180,9 @@ func colorizeLogLine(line string, showTimestamp bool) string {
 	if showTimestamp {
 		if hasLogTs {
 			formattedTs := formatTimestamp(logTs)
-			displayLine = formattedTs + " " + content
+			displayLine = logTimeStyle.Render(formattedTs) + " " + content
 		} else if hasDockerTs {
-			displayLine = dockerTs + " " + afterDockerTs
+			displayLine = logTimeStyle.Render(dockerTs) + " " + afterDockerTs
 		} else {
 			displayLine = line
 		}
@@ -211,17 +197,15 @@ func colorizeLogLine(line string, showTimestamp bool) string {
 	}
 
 	lower := strings.ToLower(displayLine)
-	displayLine = strings.ReplaceAll(displayLine, "[", "[[]")
-
 	switch {
 	case strings.Contains(lower, "error") || strings.Contains(lower, "fatal") || strings.Contains(lower, "panic"):
-		return "[red]" + displayLine + "[-]"
+		return logErrorStyle.Render(displayLine)
 	case strings.Contains(lower, "warn"):
-		return "[yellow]" + displayLine + "[-]"
+		return logWarnStyle.Render(displayLine)
 	case strings.Contains(lower, "debug") || strings.Contains(lower, "trace"):
-		return "[gray]" + displayLine + "[-]"
+		return logDebugStyle.Render(displayLine)
 	case strings.Contains(lower, "info"):
-		return "[green]" + displayLine + "[-]"
+		return logInfoStyle.Render(displayLine)
 	default:
 		return displayLine
 	}
