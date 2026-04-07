@@ -1,13 +1,16 @@
 package tui
 
 import (
+	"image/color"
+	"strings"
+
 	"charm.land/lipgloss/v2"
 )
 
 // sparklineChars are unicode block characters ordered from low to high.
 var sparklineChars = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
-const sparklineMaxHistory = 20
+const sparklineMaxHistory = 8
 
 // metricHistory tracks recent CPU and memory values for sparkline rendering.
 type metricHistory struct {
@@ -26,16 +29,36 @@ func (h *metricHistory) push(cpu, mem float64) {
 	}
 }
 
-// renderSparkline renders a unicode sparkline from a slice of percentage values.
-func renderSparkline(values []float64, style lipgloss.Style) string {
+// sparkColor picks a color from the gradient based on a 0..1 normalized value.
+func sparkColor(normalized float64, gradient []color.Color) color.Color {
+	if len(gradient) == 0 {
+		return lipgloss.Color("#cdd6f4")
+	}
+	if normalized <= 0 {
+		return gradient[0]
+	}
+	if normalized >= 1 {
+		return gradient[len(gradient)-1]
+	}
+	idx := normalized * float64(len(gradient)-1)
+	i := int(idx)
+	if i >= len(gradient)-1 {
+		return gradient[len(gradient)-1]
+	}
+	return gradient[i]
+}
+
+// renderSparkline renders a unicode sparkline with per-character gradient color.
+// bg is optional: if non-nil, each character gets that background color.
+func renderSparkline(values []float64, gradient []color.Color, bg color.Color) string {
 	if len(values) == 0 {
 		return ""
 	}
 
 	const maxVal = 100.0
+	var b strings.Builder
 
-	result := make([]rune, len(values))
-	for i, v := range values {
+	for _, v := range values {
 		normalized := v / maxVal
 		if normalized > 1.0 {
 			normalized = 1.0
@@ -47,7 +70,19 @@ func renderSparkline(values []float64, style lipgloss.Style) string {
 		if idx >= len(sparklineChars) {
 			idx = len(sparklineChars) - 1
 		}
-		result[i] = sparklineChars[idx]
+		c := sparkColor(normalized, gradient)
+		s := lipgloss.NewStyle().Foreground(c)
+		if bg != nil {
+			s = s.Background(bg)
+		}
+		b.WriteString(s.Render(string(sparklineChars[idx])))
 	}
-	return style.Render(string(result))
+
+	s := lipgloss.NewStyle()
+	if bg != nil {
+		s = s.Background(bg)
+	}
+	b.WriteString(s.Render(strings.Repeat(" ", sparklineMaxHistory-len(values))))
+
+	return b.String()
 }

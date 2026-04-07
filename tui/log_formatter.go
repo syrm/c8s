@@ -132,7 +132,7 @@ func getLevelStyle(level string) lipgloss.Style {
 	case "DEBUG", "TRACE":
 		return logDebugStyle
 	default:
-		return lipgloss.NewStyle().Foreground(colorWhite)
+		return lipgloss.NewStyle().Foreground(cText)
 	}
 }
 

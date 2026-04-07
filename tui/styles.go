@@ -6,178 +6,260 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Color palette — k9s-inspired dark theme.
+// Catppuccin Mocha palette.
 var (
-	colorCyan      color.Color = lipgloss.Color("#00FFFF")
-	colorWhite     color.Color = lipgloss.Color("#FFFFFF")
-	colorBlack     color.Color = lipgloss.Color("#000000")
-	colorNavy      color.Color = lipgloss.Color("#000080")
-	colorGreen     color.Color = lipgloss.Color("#00FF00")
-	colorRed       color.Color = lipgloss.Color("#FF0000")
-	colorYellow    color.Color = lipgloss.Color("#FFFF00")
-	colorFuchsia   color.Color = lipgloss.Color("#FF00FF")
-	colorGray      color.Color = lipgloss.Color("#808080")
-	colorDarkGray  color.Color = lipgloss.Color("#444444")
-	colorBlue      color.Color = lipgloss.Color("#5555FF")
-	colorTeal      color.Color = lipgloss.Color("#008B8B")
-	colorDarkCyan  color.Color = lipgloss.Color("#005F5F")
-	colorLightCyan color.Color = lipgloss.Color("#87FFFF")
+	cBase     color.Color = lipgloss.Color("#1e1e2e")
+	cMantle   color.Color = lipgloss.Color("#181825")
+	cCrust    color.Color = lipgloss.Color("#11111b")
+	cSurface0 color.Color = lipgloss.Color("#313244")
+	cSurface1 color.Color = lipgloss.Color("#45475a")
+	cSurface2 color.Color = lipgloss.Color("#585b70")
+	cOverlay0 color.Color = lipgloss.Color("#6c7086")
+	cOverlay1 color.Color = lipgloss.Color("#7f849c")
+	cSubtext0 color.Color = lipgloss.Color("#a6adc8")
+	cSubtext1 color.Color = lipgloss.Color("#bac2de")
+	cText     color.Color = lipgloss.Color("#cdd6f4")
+	cLavender color.Color = lipgloss.Color("#b4befe")
+	cBlue     color.Color = lipgloss.Color("#89b4fa")
+	cSapphire color.Color = lipgloss.Color("#74c7ec")
+	cTeal     color.Color = lipgloss.Color("#94e2d5")
+	cGreen    color.Color = lipgloss.Color("#a6e3a1")
+	cYellow   color.Color = lipgloss.Color("#f9e2af")
+	cPeach    color.Color = lipgloss.Color("#fab387")
+	cMaroon   color.Color = lipgloss.Color("#eba0ac")
+	cRed      color.Color = lipgloss.Color("#f38ba8")
+	cMauve    color.Color = lipgloss.Color("#cba6f7")
+	cPink     color.Color = lipgloss.Color("#f5c2e7")
+	cFlamingo color.Color = lipgloss.Color("#f2cdcd")
 )
 
-// Header styles.
+// Header / title bar.
 var (
 	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorWhite).
-			Background(colorNavy).
+			Foreground(cSubtext0).
+			Background(cBase).
 			Padding(0, 1)
 
 	headerTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(colorCyan)
+				Foreground(cMauve).
+				Background(cBase)
 
 	headerCountStyle = lipgloss.NewStyle().
-				Foreground(colorFuchsia)
+				Bold(true).
+				Foreground(cLavender).
+				Background(cBase)
 
 	headerFilterStyle = lipgloss.NewStyle().
-				Foreground(colorWhite).
+				Foreground(cYellow).
+				Background(cBase).
 				Italic(true)
 
 	headerPausedStyle = lipgloss.NewStyle().
-				Foreground(colorFuchsia).
+				Foreground(cPeach).
+				Background(cBase).
 				Bold(true)
 )
 
-// Tab styles for breadcrumb navigation.
+// Breadcrumb tabs.
 var (
 	activeTabStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colorCyan).
-			Background(colorNavy).
+			Foreground(cBase).
+			Background(cMauve).
 			Padding(0, 2)
 
 	inactiveTabStyle = lipgloss.NewStyle().
-				Foreground(colorGray).
-				Background(colorDarkGray).
+				Foreground(cSubtext0).
+				Background(cSurface0).
 				Padding(0, 2)
 
 	tabSeparatorStyle = lipgloss.NewStyle().
-				Foreground(colorGray)
+				Foreground(cOverlay0).
+				Background(cBase)
 )
 
-// Table styles with gradient borders.
+// Table.
 var (
 	tableHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(colorCyan).
+				Foreground(cSubtext0).
+				Background(cBase).
 				Padding(0, 1)
 
 	tableCellStyle = lipgloss.NewStyle().
-			Foreground(colorWhite).
+			Foreground(cText).
+			Background(cBase).
 			Padding(0, 1)
 
 	tableSelectedStyle = lipgloss.NewStyle().
-				Background(colorNavy).
-				Foreground(colorWhite).
+				Foreground(cText).
 				Bold(true).
+				Background(cSurface0).
 				Padding(0, 1)
+
+	tableAccentSelected = lipgloss.NewStyle().
+				Foreground(cMauve).
+				Background(cSurface0).
+				Bold(true)
 
 	tableBorderStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(colorNavy).
-				BorderForegroundBlend(colorDarkCyan, colorCyan, colorTeal)
+				BorderForeground(cSurface1).
+				BorderForegroundBlend(cSurface2, cMauve, cSurface2).
+				BorderBackground(cBase)
 )
 
-// Status color styles.
+// Status indicators with dot prefix.
 var (
-	statusRunningStyle    = lipgloss.NewStyle().Foreground(colorGreen)
-	statusExitedStyle     = lipgloss.NewStyle().Foreground(colorRed)
-	statusPausedStyle     = lipgloss.NewStyle().Foreground(colorYellow)
-	statusRestartingStyle = lipgloss.NewStyle().Foreground(colorFuchsia)
-	statusCreatedStyle    = lipgloss.NewStyle().Foreground(colorCyan)
-	statusDefaultStyle    = lipgloss.NewStyle().Foreground(colorGray)
+	statusRunningStyle    = lipgloss.NewStyle().Foreground(cGreen).Background(cBase)
+	statusExitedStyle     = lipgloss.NewStyle().Foreground(cRed).Background(cBase)
+	statusPausedStyle     = lipgloss.NewStyle().Foreground(cYellow).Background(cBase)
+	statusRestartingStyle = lipgloss.NewStyle().Foreground(cPeach).Background(cBase)
+	statusCreatedStyle    = lipgloss.NewStyle().Foreground(cSapphire).Background(cBase)
+	statusDefaultStyle    = lipgloss.NewStyle().Foreground(cOverlay0).Background(cBase)
+)
+
+// Status dot characters.
+const (
+	dotRunning = "●"
+	dotExited  = "○"
+	dotPaused  = "◉"
+	dotOther   = "◌"
 )
 
 // Log level styles.
 var (
-	logErrorStyle = lipgloss.NewStyle().Foreground(colorRed)
-	logWarnStyle  = lipgloss.NewStyle().Foreground(colorYellow)
-	logInfoStyle  = lipgloss.NewStyle().Foreground(colorGreen)
-	logDebugStyle = lipgloss.NewStyle().Foreground(colorGray)
-	logTimeStyle  = lipgloss.NewStyle().Foreground(colorGray)
-	logKeyStyle   = lipgloss.NewStyle().Foreground(colorBlue)
+	logErrorStyle = lipgloss.NewStyle().Foreground(cRed).Background(cBase)
+	logWarnStyle  = lipgloss.NewStyle().Foreground(cYellow).Background(cBase)
+	logInfoStyle  = lipgloss.NewStyle().Foreground(cGreen).Background(cBase)
+	logDebugStyle = lipgloss.NewStyle().Foreground(cOverlay0).Background(cBase)
+	logTimeStyle  = lipgloss.NewStyle().Foreground(cOverlay1).Background(cBase)
+	logKeyStyle   = lipgloss.NewStyle().Foreground(cBlue).Background(cBase)
 )
 
-// Sort indicator styles.
-var (
-	sortIndicatorStyle = lipgloss.NewStyle().Foreground(colorFuchsia)
-)
+// Sort indicator.
+var sortIndicatorStyle = lipgloss.NewStyle().Foreground(cMauve).Background(cBase)
 
 // Warning indicator.
-var (
-	warningStyle = lipgloss.NewStyle().Foreground(colorYellow)
-)
+var warningStyle = lipgloss.NewStyle().Foreground(cPeach).Background(cBase)
 
-// Status bar style.
+// Status bar / footer.
 var (
 	statusBarStyle = lipgloss.NewStyle().
-			Foreground(colorRed).
+			Foreground(cRed).
 			Align(lipgloss.Center)
 
 	refreshTimerStyle = lipgloss.NewStyle().
-				Foreground(colorGray).
+				Foreground(cOverlay0).
+				Background(cBase).
 				Italic(true)
+
+	footerStyle = lipgloss.NewStyle().
+			Foreground(cOverlay0).
+			Background(cBase).
+			Padding(0, 1)
+
+	footerKeyStyle = lipgloss.NewStyle().
+			Foreground(cMauve).
+			Background(cBase).
+			Bold(true)
+
+	footerDescStyle = lipgloss.NewStyle().
+			Foreground(cSubtext0).
+			Background(cBase)
 )
 
-// Sparkline styles.
-var (
-	sparklineCPUStyle = lipgloss.NewStyle().Foreground(colorGreen)
-	sparklineMEMStyle = lipgloss.NewStyle().Foreground(colorBlue)
-)
+// Sparkline gradient colors (low → high).
+var sparkGradient = []color.Color{
+	lipgloss.Color("#a6e3a1"), // green
+	lipgloss.Color("#a6e3a1"),
+	lipgloss.Color("#f9e2af"), // yellow
+	lipgloss.Color("#fab387"), // peach
+	lipgloss.Color("#f38ba8"), // red
+}
 
 // Help styles.
 var (
 	helpTitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colorCyan)
+			Foreground(cMauve).
+			Background(cBase)
 
 	helpKeyStyle = lipgloss.NewStyle().
-			Foreground(colorCyan)
+			Foreground(cLavender).
+			Background(cBase)
 
 	helpDescStyle = lipgloss.NewStyle().
-			Foreground(colorWhite)
+			Foreground(cSubtext0).
+			Background(cBase)
 
 	helpBorderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorCyan).
-			BorderForegroundBlend(colorTeal, colorCyan, colorLightCyan).
-			Padding(1, 2)
+			BorderForeground(cSurface2).
+			BorderForegroundBlend(cSurface1, cMauve, cSurface1).
+			Padding(1, 3)
 )
 
-// Search input style.
+// Search input.
 var (
 	searchLabelStyle = lipgloss.NewStyle().
-				Foreground(colorCyan)
+				Foreground(cMauve).
+				Background(cBase)
 
 	searchInputStyle = lipgloss.NewStyle().
-				Foreground(colorWhite)
+				Foreground(cText).
+				Background(cBase)
 )
 
-// Spinner style.
+// Spinner.
+var spinnerStyle = lipgloss.NewStyle().Foreground(cMauve).Background(cBase)
+
+// Progress bar.
+var progressStyle = lipgloss.NewStyle().
+	Foreground(cSubtext0).
+	Background(cBase).
+	Padding(1, 2)
+
+// Log gutter.
 var (
-	spinnerStyle = lipgloss.NewStyle().Foreground(colorFuchsia)
+	gutterStyle     = lipgloss.NewStyle().Foreground(cSurface2).Background(cBase)
+	gutterSoftStyle = lipgloss.NewStyle().Foreground(cSurface1).Background(cBase)
 )
 
-// Progress bar style.
-var (
-	progressStyle = lipgloss.NewStyle().Padding(1, 2)
-)
+// Modal overlay.
+var modalStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(cSurface2).
+	BorderForegroundBlend(cSurface1, cMauve, cSurface1).
+	BorderBackground(cBase).
+	Background(cBase).
+	Padding(1, 3)
 
-// Log gutter styles.
-var (
-	gutterStyle     = lipgloss.NewStyle().Foreground(colorDarkGray)
-	gutterSoftStyle = lipgloss.NewStyle().Foreground(colorDarkGray)
-)
+// baseBg wraps plain text with the base background to prevent transparency.
+var baseBgStyle = lipgloss.NewStyle().Background(cBase).Foreground(cSubtext0)
+
+func baseBg(s string) string {
+	return baseBgStyle.Render(s)
+}
+
+// statusDot returns a colored dot for a container status.
+func statusDot(status string) string {
+	switch status {
+	case "running":
+		return statusRunningStyle.Render(dotRunning)
+	case "exited", "dead", "removing":
+		return statusExitedStyle.Render(dotExited)
+	case "paused":
+		return statusPausedStyle.Render(dotPaused)
+	case "restarting":
+		return statusRestartingStyle.Render(dotOther)
+	case "created":
+		return statusCreatedStyle.Render(dotOther)
+	default:
+		return statusDefaultStyle.Render(dotOther)
+	}
+}
 
 // statusStyle returns the appropriate style for a container status.
 func statusStyle(status string) lipgloss.Style {
