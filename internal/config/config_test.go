@@ -35,11 +35,14 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.RefreshInterval != 1*time.Second {
 		t.Errorf("RefreshInterval = %v, want %v", cfg.RefreshInterval, 1*time.Second)
 	}
-	if cfg.LogHistory != 1*time.Hour {
-		t.Errorf("LogHistory = %v, want %v", cfg.LogHistory, 1*time.Hour)
+	if cfg.LogHistory != 168*time.Hour {
+		t.Errorf("LogHistory = %v, want %v", cfg.LogHistory, 168*time.Hour)
 	}
-	if cfg.MaxLogLines != 1000 {
-		t.Errorf("MaxLogLines = %d, want %d", cfg.MaxLogLines, 1000)
+	if cfg.MaxLogLines != 500000 {
+		t.Errorf("MaxLogLines = %d, want %d", cfg.MaxLogLines, 500000)
+	}
+	if cfg.LogTail != "500" {
+		t.Errorf("LogTail = %q, want %q", cfg.LogTail, "500")
 	}
 	if cfg.MaxConcurrentActions != 3 {
 		t.Errorf("MaxConcurrentActions = %d, want %d", cfg.MaxConcurrentActions, 3)
@@ -101,8 +104,8 @@ func TestLoad_InvalidEnvFallsBackToDefault(t *testing.T) {
 	if cfg.DockerTimeout != 30*time.Second {
 		t.Errorf("DockerTimeout = %v, want default %v", cfg.DockerTimeout, 30*time.Second)
 	}
-	if cfg.MaxLogLines != 1000 {
-		t.Errorf("MaxLogLines = %d, want default %d", cfg.MaxLogLines, 1000)
+	if cfg.MaxLogLines != 500000 {
+		t.Errorf("MaxLogLines = %d, want default %d", cfg.MaxLogLines, 500000)
 	}
 }
 
@@ -138,6 +141,7 @@ func TestValidate_AllFields(t *testing.T) {
 				RefreshInterval:         time.Second,
 				LogHistory:              time.Hour,
 				MaxLogLines:             1000,
+				LogTail:                 "all",
 				MaxConcurrentActions:    3,
 				ChannelTimeout:          5 * time.Second,
 				InitialContainerMapSize: 256,

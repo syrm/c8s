@@ -23,6 +23,7 @@ type Config struct {
 	RefreshInterval time.Duration
 	LogHistory      time.Duration
 	MaxLogLines     int
+	LogTail         string
 
 	// TUI configuration
 	MaxConcurrentActions int
@@ -46,8 +47,9 @@ func Load() (*Config, error) {
 
 		// Monitoring defaults
 		RefreshInterval: getEnvDuration("REFRESH_INTERVAL", 1*time.Second),
-		LogHistory:      getEnvDuration("LOG_HISTORY", 1*time.Hour),
-		MaxLogLines:     getEnvInt("MAX_LOG_LINES", 1000),
+		LogHistory:      getEnvDuration("LOG_HISTORY", 168*time.Hour),
+		MaxLogLines:     getEnvInt("MAX_LOG_LINES", 500000),
+		LogTail:         getEnvString("LOG_TAIL", "500"),
 
 		// TUI defaults
 		MaxConcurrentActions: getEnvInt("MAX_CONCURRENT_ACTIONS", 3),
@@ -74,11 +76,11 @@ func (c *Config) Validate() error {
 	if c.RefreshInterval <= 0 {
 		return fmt.Errorf("REFRESH_INTERVAL must be positive")
 	}
-	if c.LogHistory <= 0 {
-		return fmt.Errorf("LOG_HISTORY must be positive")
-	}
 	if c.MaxLogLines <= 0 {
 		return fmt.Errorf("MAX_LOG_LINES must be positive")
+	}
+	if c.LogTail == "" {
+		return fmt.Errorf("LOG_TAIL must not be empty")
 	}
 	if c.MaxConcurrentActions <= 0 {
 		return fmt.Errorf("MAX_CONCURRENT_ACTIONS must be positive")

@@ -59,7 +59,6 @@ type Model struct {
 	// Data
 	projects   []model.Project
 	containers []model.Container
-	logs       []string
 
 	// Selection cursors
 	projectCursor   int
@@ -69,19 +68,21 @@ type Model struct {
 	projectSort   sortState[projectSortColumn]
 	containerSort sortState[containerSortColumn]
 
-	// Search / filter
-	searching       bool
-	searchInput     textinput.Model
-	searchQuery     string
-	logFilter       string
-	logFilterActive bool
-	logFilterInput  textinput.Model
+	// Search / filter (project & container lists)
+	searching   bool
+	searchInput textinput.Model
+	searchQuery string
 
 	// Log view state
-	logViewport   viewport.Model
-	logPaused     bool
-	showTimestamp bool
-	disappeared   bool
+	logViewport     viewport.Model
+	logLines        []string        // raw log lines for search
+	logContent      strings.Builder // formatted content for viewport
+	logChan         chan []string   // channel for streaming log lines from Docker
+	logSearchQuery  string
+	logSearchActive bool
+	logSearchInput  textinput.Model
+	showTimestamp   bool
+	disappeared     bool
 
 	// Help (bubbles/help component)
 	showHelp  bool
@@ -127,8 +128,8 @@ func New(logger *slog.Logger) *Model {
 	si.Prompt = "Filter: "
 
 	lf := textinput.New()
-	lf.Placeholder = "filter logs..."
-	lf.Prompt = "Filter: "
+	lf.Placeholder = "search logs..."
+	lf.Prompt = "Search: "
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.SoftWrap = true
@@ -158,7 +159,7 @@ func New(logger *slog.Logger) *Model {
 		projectSort:    sortState[projectSortColumn]{column: projectSortCPU, asc: false},
 		containerSort:  sortState[containerSortColumn]{column: containerSortCPU, asc: false},
 		searchInput:    si,
-		logFilterInput: lf,
+		logSearchInput: lf,
 		logViewport:    vp,
 		helpModel:      h,
 		spinner:        sp,
@@ -221,8 +222,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateContainerSparklines()
 		return m, nil
 
-	case containerLogMsg:
-		return m.handleContainerLogMsg(msg)
+	case logStartedMsg:
+		return m.handleLogStartedMsg(msg)
+
+	case logLinesMsg:
+		return m.handleLogLinesMsg(msg)
+
+	case logStreamDoneMsg:
+		return m, nil
 
 	case statusMsg:
 		m.statusMsg = string(msg)
@@ -283,9 +290,9 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchInput(msg)
 	}
 
-	// If filtering logs, handle filter input
-	if m.logFilterActive {
-		return m.handleLogFilterInput(msg)
+	// If searching logs, handle search input
+	if m.logSearchActive {
+		return m.handleLogSearchInput(msg)
 	}
 
 	// If help is shown, only allow closing it
@@ -301,9 +308,6 @@ func (m *Model) handleKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if msg.String() == "enter" || msg.String() == "esc" {
 			m.disappeared = false
 			m.view = viewContainerList
-			m.logPaused = false
-			m.logFilter = ""
-			m.logs = nil
 		}
 		return m, nil
 	}
@@ -422,23 +426,27 @@ func (m *Model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "left", "h":
 		return m.exitLogView()
-	case "p":
-		m.logPaused = !m.logPaused
 	case "t":
 		m.showTimestamp = !m.showTimestamp
+		m.rebuildLogViewport()
 	case "/":
-		m.logFilterActive = true
-		m.logFilterInput.SetValue(m.logFilter)
-		m.logFilterInput.Focus()
+		m.logSearchActive = true
+		m.logSearchInput.SetValue(m.logSearchQuery)
+		m.logSearchInput.Focus()
 		return m, nil
 	case "c":
-		if m.logFilter != "" {
-			m.logFilter = ""
+		if m.logSearchQuery != "" {
+			m.logSearchQuery = ""
+			m.logViewport.SetHighlights(nil)
 		}
 	case "n":
 		m.logViewport.HighlightNext()
 	case "shift+n":
 		m.logViewport.HighlightPrevious()
+	case "G":
+		m.logViewport.GotoBottom()
+	case "g":
+		m.logViewport.GotoTop()
 	case "?":
 		m.showHelp = true
 	default:
@@ -481,22 +489,23 @@ func (m *Model) handleSearchInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleLogFilterInput handles text input for log filter.
-func (m *Model) handleLogFilterInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+// handleLogSearchInput handles text input for log search.
+func (m *Model) handleLogSearchInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		m.logFilter = m.logFilterInput.Value()
-		m.logFilterActive = false
-		m.logFilterInput.Blur()
+		m.logSearchQuery = m.logSearchInput.Value()
+		m.logSearchActive = false
+		m.logSearchInput.Blur()
+		m.applyLogSearch()
 		return m, nil
 	case "esc":
-		m.logFilterActive = false
-		m.logFilterInput.Blur()
+		m.logSearchActive = false
+		m.logSearchInput.Blur()
 		return m, nil
 	}
 
 	var cmd tea.Cmd
-	m.logFilterInput, cmd = m.logFilterInput.Update(msg)
+	m.logSearchInput, cmd = m.logSearchInput.Update(msg)
 	return m, cmd
 }
 
@@ -524,16 +533,14 @@ func (m *Model) handleTick() (tea.Model, tea.Cmd) {
 			fetchCmd = m.fetchContainersCmd()
 		}
 	case viewContainerLog:
-		if !m.logPaused {
-			fetchCmd = m.fetchContainerLogCmd()
-		}
+		// Logs are streamed via logChan, no polling needed
 	}
 
 	return m, tea.Batch(tickCmd(), fetchCmd)
 }
 
-// handleContainerLogMsg handles a container log response.
-func (m *Model) handleContainerLogMsg(msg containerLogMsg) (tea.Model, tea.Cmd) {
+// handleLogStartedMsg handles the initial log stream response.
+func (m *Model) handleLogStartedMsg(msg logStartedMsg) (tea.Model, tea.Cmd) {
 	if !msg.found {
 		if m.view == viewContainerLog && !m.disappeared {
 			m.disappeared = true
@@ -542,11 +549,44 @@ func (m *Model) handleContainerLogMsg(msg containerLogMsg) (tea.Model, tea.Cmd) 
 	}
 
 	m.disappeared = false
-	if len(msg.container.Logs) > 0 {
-		m.logs = msg.container.Logs
-		m.updateLogViewport()
+	// Start listening for log lines from the channel
+	return m, waitForLogLines(m.logChan)
+}
+
+// handleLogLinesMsg handles a batch of new log lines from the stream.
+func (m *Model) handleLogLinesMsg(msg logLinesMsg) (tea.Model, tea.Cmd) {
+	if m.view != viewContainerLog {
+		return m, nil
 	}
-	return m, nil
+
+	// Check if we should auto-scroll (viewport is at bottom before adding)
+	wasAtBottom := m.logViewport.AtBottom()
+
+	// Append raw lines and formatted content
+	for _, line := range msg {
+		m.logLines = append(m.logLines, line)
+		formatted := colorizeLogLine(line, m.showTimestamp)
+		if !strings.HasSuffix(formatted, "\n") {
+			formatted += "\n"
+		}
+		m.logContent.WriteString(formatted)
+	}
+
+	// Update viewport content
+	m.logViewport.SetContent(m.logContent.String())
+
+	// Re-apply search highlights if active
+	if m.logSearchQuery != "" {
+		m.applyLogSearch()
+	}
+
+	// Smart auto-scroll: only scroll to bottom if we were already there
+	if wasAtBottom {
+		m.logViewport.GotoBottom()
+	}
+
+	// Continue listening for more lines
+	return m, waitForLogLines(m.logChan)
 }
 
 // enterContainerView navigates from project list to container list.
@@ -588,13 +628,17 @@ func (m *Model) enterLogView() (tea.Model, tea.Cmd) {
 	m.containerName = container.Name
 	m.containerService = container.Service
 	m.view = viewContainerLog
-	m.logPaused = false
-	m.logFilter = ""
-	m.logs = nil
+	m.logLines = nil
+	m.logContent.Reset()
+	m.logSearchQuery = ""
+	m.logSearchActive = false
 	m.showTimestamp = false
 	m.disappeared = false
+	m.logChan = make(chan []string, 256)
+	m.logViewport.SetContent("")
+	m.logViewport.SetHighlights(nil)
 
-	return m, m.fetchContainerLogCmd()
+	return m, m.startLogStreamCmd()
 }
 
 // exitLogView navigates back to container list.
@@ -602,10 +646,12 @@ func (m *Model) exitLogView() (tea.Model, tea.Cmd) {
 	cmds := []tea.Cmd{m.stopLogCollectionCmd(m.containerID)}
 	m.view = viewContainerList
 	m.containerID = ""
-	m.logPaused = false
-	m.logFilter = ""
-	m.logs = nil
+	m.logLines = nil
+	m.logContent.Reset()
+	m.logSearchQuery = ""
+	m.logSearchActive = false
 	m.disappeared = false
+	m.logChan = nil
 	cmds = append(cmds, m.fetchContainersCmd())
 	return m, tea.Batch(cmds...)
 }
@@ -725,33 +771,38 @@ func (m *Model) filteredContainers() []model.Container {
 	return filtered
 }
 
-// updateLogViewport updates the viewport content with formatted logs.
-func (m *Model) updateLogViewport() {
-	var builder strings.Builder
-	for _, line := range m.logs {
-		if m.logFilter != "" && !strings.Contains(strings.ToLower(line), strings.ToLower(m.logFilter)) {
-			continue
-		}
+// rebuildLogViewport rebuilds the entire viewport content from raw log lines.
+// Used when display settings change (e.g., timestamp toggle).
+func (m *Model) rebuildLogViewport() {
+	wasAtBottom := m.logViewport.AtBottom()
+
+	m.logContent.Reset()
+	for _, line := range m.logLines {
 		formatted := colorizeLogLine(line, m.showTimestamp)
-		builder.WriteString(formatted)
 		if !strings.HasSuffix(formatted, "\n") {
-			builder.WriteString("\n")
+			formatted += "\n"
 		}
+		m.logContent.WriteString(formatted)
 	}
-	content := builder.String()
-	m.logViewport.SetContent(content)
+	m.logViewport.SetContent(m.logContent.String())
 
-	// Highlight search matches in viewport
-	if m.logFilter != "" {
-		highlights := findHighlightRanges(content, m.logFilter)
-		m.logViewport.SetHighlights(highlights)
-	} else {
-		m.logViewport.SetHighlights(nil)
+	if m.logSearchQuery != "" {
+		m.applyLogSearch()
 	}
 
-	if !m.logPaused {
+	if wasAtBottom {
 		m.logViewport.GotoBottom()
 	}
+}
+
+// applyLogSearch finds all matches in the viewport content and sets highlights.
+func (m *Model) applyLogSearch() {
+	if m.logSearchQuery == "" {
+		m.logViewport.SetHighlights(nil)
+		return
+	}
+	highlights := findHighlightRanges(m.logContent.String(), m.logSearchQuery)
+	m.logViewport.SetHighlights(highlights)
 }
 
 // findHighlightRanges finds all byte offset ranges of query matches in content.
@@ -1005,18 +1056,16 @@ func (m *Model) viewLogView() string {
 	tabs := m.renderTabs()
 	header := m.renderHeader()
 
-	m.updateLogViewport()
-
 	logContent := tableBorderStyle.Width(m.width - 2).Render(m.logViewport.View())
 
-	var filterLine string
-	if m.logFilterActive {
-		filterLine = "\n" + m.logFilterInput.View()
+	var searchLine string
+	if m.logSearchActive {
+		searchLine = "\n" + m.logSearchInput.View()
 	}
 
 	footer := m.renderFooter()
 
-	return tabs + "\n" + header + "\n" + logContent + filterLine + "\n" + footer
+	return tabs + "\n" + header + "\n" + logContent + searchLine + "\n" + footer
 }
 
 // viewHelp renders the help modal using the bubbles/help component.
@@ -1114,15 +1163,13 @@ func (m *Model) renderHeader() string {
 
 	case viewContainerLog:
 		text = headerTitleStyle.Render("c8s") + baseBg(" │ Logs "+m.containerService)
-		if m.logPaused {
-			text += baseBg(" ") + headerPausedStyle.Render("⏸ PAUSED")
-		}
-		if m.logFilter != "" {
-			text += baseBg(" ") + headerFilterStyle.Render("(filter: "+m.logFilter+")")
+		if m.logSearchQuery != "" {
+			text += baseBg(" ") + headerFilterStyle.Render("(search: "+m.logSearchQuery+")")
 		}
 		if m.showTimestamp {
 			text += baseBg(" ") + headerFilterStyle.Render("(timestamps)")
 		}
+		text += baseBg(" ") + headerFilterStyle.Render(fmt.Sprintf("(%d lines)", len(m.logLines)))
 	}
 
 	// Add refresh timer
@@ -1173,10 +1220,12 @@ func (m *Model) renderFooter() string {
 	case viewContainerLog:
 		hints = []string{
 			k("←", "back"),
-			k("p", "pause"),
+			k("↑↓", "scroll"),
+			k("g/G", "top/bottom"),
 			k("t", "timestamps"),
-			k("/", "filter"),
-			k("n/N", "next/prev match"),
+			k("/", "search"),
+			k("n/N", "next/prev"),
+			k("c", "clear"),
 			k("?", "help"),
 		}
 	}

@@ -13,9 +13,11 @@ type RequestProjectList struct {
 func (p *RequestProjectList) isRequestData() {}
 
 // RequestContainerLog requests logs for a specific container.
+// LogChan receives batches of new log lines streamed from Docker.
 type RequestContainerLog struct {
 	ContainerID ContainerID
 	Response    chan Container
+	LogChan     chan []string
 }
 
 func (p *RequestContainerLog) isRequestData() {}

@@ -11,7 +11,6 @@ import (
 	"github.com/docker/docker/api/types/events"
 
 	"github.com/syrm/c8s/internal/model"
-	"github.com/syrm/c8s/internal/pool"
 )
 
 // Container represents a Docker container with its state and metrics.
@@ -36,10 +35,6 @@ type Container struct {
 
 	// statsGen tracks the current generation of stats goroutine
 	statsGen atomic.Uint64
-
-	// logs are protected by mu as well now, simplifying synchronization
-	logs        []string
-	maxLogLines int
 }
 
 // NewContainer creates a new Container from a Docker API container summary.
@@ -49,7 +44,6 @@ func NewContainer(
 	dockerContainer apiContainer.Summary,
 	action events.Action,
 	project model.ContainerProject,
-	maxLogLines int,
 ) (*Container, error) {
 	// Don't create container if context is already cancelled
 	if ctx.Err() != nil {
@@ -74,14 +68,13 @@ func NewContainer(
 	}
 
 	return &Container{
-		ID:          model.ContainerID(dockerContainer.ID),
-		Service:     dockerContainer.Labels["com.docker.compose.service"],
-		Name:        containerName,
-		Project:     project,
-		ctx:         childCtx,
-		cancel:      cancel,
-		Status:      status,
-		maxLogLines: maxLogLines,
+		ID:      model.ContainerID(dockerContainer.ID),
+		Service: dockerContainer.Labels["com.docker.compose.service"],
+		Name:    containerName,
+		Project: project,
+		ctx:     childCtx,
+		cancel:  cancel,
+		Status:  status,
 	}, nil
 }
 
@@ -89,10 +82,6 @@ func NewContainer(
 func (c *Container) Snapshot() model.Container {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	// Copy logs
-	logsCopy := make([]string, len(c.logs))
-	copy(logsCopy, c.logs)
 
 	return model.Container{
 		ID:               c.ID,
@@ -103,66 +92,14 @@ func (c *Container) Snapshot() model.Container {
 		MemoryPercentage: c.MemoryPercentage,
 		Status:           c.Status,
 		PendingAction:    c.PendingAction,
-		Logs:             logsCopy,
 	}
-}
-
-// AppendLog adds a log line to the container's log buffer.
-// It uses a pool to reduce memory allocations and GC pressure.
-func (c *Container) AppendLog(line string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Get a slice from the pool if we need to allocate
-	if c.logs == nil {
-		c.logs = pool.StringSlicePool().Get()
-	}
-
-	c.logs = append(c.logs, line)
-
-	// Truncate if we exceed max lines
-	if len(c.logs) > c.maxLogLines {
-		// Keep only the last maxLogLines
-		copy(c.logs, c.logs[len(c.logs)-c.maxLogLines:])
-		c.logs = c.logs[:c.maxLogLines]
-	}
-}
-
-// GetLogsCopy returns a copy of the logs slice.
-func (c *Container) GetLogsCopy() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if c.logs == nil {
-		return nil
-	}
-	result := make([]string, len(c.logs))
-	copy(result, c.logs)
-	return result
-}
-
-// LogsLen returns the number of log lines.
-func (c *Container) LogsLen() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.logs)
 }
 
 // Delete cancels the container's context and clears resources.
-// It returns the log slice to the pool for reuse.
 func (c *Container) Delete() {
 	if c.cancel != nil {
 		c.cancel()
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Return the log slice to the pool
-	if c.logs != nil {
-		pool.StringSlicePool().Put(c.logs)
-	}
-	c.logs = nil
 }
 
 func (c *Container) SetStatusFromAction(action events.Action) {

@@ -10,8 +10,14 @@ type projectsMsg []model.Project
 // containersMsg is sent when the container list is refreshed.
 type containersMsg []model.Container
 
-// containerLogMsg is sent when container logs are refreshed.
-type containerLogMsg struct {
+// logLinesMsg carries a batch of new log lines from the Docker stream.
+type logLinesMsg []string
+
+// logStreamDoneMsg signals the log stream has ended.
+type logStreamDoneMsg struct{}
+
+// logStartedMsg carries the container metadata after log streaming starts.
+type logStartedMsg struct {
 	container model.Container
 	found     bool
 }

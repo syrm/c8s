@@ -21,11 +21,12 @@ type keyMap struct {
 	Stop     key.Binding
 	Restart  key.Binding
 	Remove   key.Binding
-	Pause    key.Binding
 	Time     key.Binding
 	NextHit  key.Binding
 	PrevHit  key.Binding
 	ClearLog key.Binding
+	GoTop    key.Binding
+	GoBottom key.Binding
 }
 
 var keys = keyMap{
@@ -55,11 +56,11 @@ var keys = keyMap{
 	),
 	Search: key.NewBinding(
 		key.WithKeys("/"),
-		key.WithHelp("/", "filter"),
+		key.WithHelp("/", "search/filter"),
 	),
 	Clear: key.NewBinding(
 		key.WithKeys("c"),
-		key.WithHelp("c", "clear filter"),
+		key.WithHelp("c", "clear"),
 	),
 	SortN: key.NewBinding(
 		key.WithKeys("N"),
@@ -97,10 +98,6 @@ var keys = keyMap{
 		key.WithKeys("d"),
 		key.WithHelp("d", "remove"),
 	),
-	Pause: key.NewBinding(
-		key.WithKeys("p"),
-		key.WithHelp("p", "pause"),
-	),
 	Time: key.NewBinding(
 		key.WithKeys("t"),
 		key.WithHelp("t", "timestamps"),
@@ -115,7 +112,15 @@ var keys = keyMap{
 	),
 	ClearLog: key.NewBinding(
 		key.WithKeys("c"),
-		key.WithHelp("c", "clear filter"),
+		key.WithHelp("c", "clear search"),
+	),
+	GoTop: key.NewBinding(
+		key.WithKeys("g"),
+		key.WithHelp("g", "go to top"),
+	),
+	GoBottom: key.NewBinding(
+		key.WithKeys("G"),
+		key.WithHelp("G", "go to bottom"),
 	),
 }
 
@@ -154,12 +159,13 @@ func (k containerKeyMap) FullHelp() [][]key.Binding {
 type logKeyMap struct{}
 
 func (k logKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{keys.Back, keys.Pause, keys.Search, keys.NextHit, keys.Help}
+	return []key.Binding{keys.Back, keys.Search, keys.NextHit, keys.GoTop, keys.GoBottom, keys.Help}
 }
 
 func (k logKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{keys.Back, keys.Pause, keys.Time},
+		{keys.Up, keys.Down, keys.GoTop, keys.GoBottom},
+		{keys.Back, keys.Time},
 		{keys.Search, keys.ClearLog, keys.NextHit, keys.PrevHit},
 		{keys.Help, keys.Quit},
 	}

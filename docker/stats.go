@@ -76,7 +76,7 @@ func (d *Docker) createContainer(ctx context.Context, dockerContainer apiContain
 		return
 	}
 
-	c, err := NewContainer(ctx, dockerContainer, action, project, d.cfg.MaxLogLines)
+	c, err := NewContainer(ctx, dockerContainer, action, project)
 	if err != nil {
 		// Context was cancelled or container creation failed
 		slog.DebugContext(ctx, "failed to create container", slog.Any("error", err))

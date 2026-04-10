@@ -167,66 +167,6 @@ func TestContainerSetPendingAction(t *testing.T) {
 	}
 }
 
-// TestContainerAppendLog_TableDriven tests log appending with different scenarios.
-func TestContainerAppendLog_TableDriven(t *testing.T) {
-	tests := []struct {
-		name          string
-		initialLogs   []string
-		appendLogs    []string
-		expectedCount int
-		expectedLast  string
-	}{
-		{
-			name:          "append to empty logs",
-			initialLogs:   []string{},
-			appendLogs:    []string{"log1"},
-			expectedCount: 1,
-			expectedLast:  "log1",
-		},
-		{
-			name:          "append multiple logs",
-			initialLogs:   []string{"log1"},
-			appendLogs:    []string{"log2", "log3"},
-			expectedCount: 3,
-			expectedLast:  "log3",
-		},
-		{
-			name:          "append empty string",
-			initialLogs:   []string{"log1"},
-			appendLogs:    []string{""},
-			expectedCount: 2,
-			expectedLast:  "",
-		},
-		{
-			name:          "append nil slice",
-			initialLogs:   []string{"log1"},
-			appendLogs:    nil,
-			expectedCount: 1,
-			expectedLast:  "log1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := &Container{maxLogLines: 1000}
-			c.logs = make([]string, len(tt.initialLogs))
-			copy(c.logs, tt.initialLogs)
-
-			for _, log := range tt.appendLogs {
-				c.AppendLog(log)
-			}
-
-			if len(c.logs) != tt.expectedCount {
-				t.Errorf("Expected %d logs, got %d", tt.expectedCount, len(c.logs))
-			}
-
-			if tt.expectedCount > 0 && c.logs[len(c.logs)-1] != tt.expectedLast {
-				t.Errorf("Expected last log to be %v, got %v", tt.expectedLast, c.logs[len(c.logs)-1])
-			}
-		})
-	}
-}
-
 // TestContainerSnapshot tests the Snapshot method with various container states.
 func TestContainerSnapshot_TableDriven(t *testing.T) {
 	tests := []struct {
@@ -245,7 +185,6 @@ func TestContainerSnapshot_TableDriven(t *testing.T) {
 				MemoryPercentage: 75.2,
 				Status:           model.StatusRunning,
 				PendingAction:    "",
-				logs:             []string{"log1", "log2"},
 			},
 			expected: model.Container{
 				ID:               model.ContainerID("test-id"),
@@ -256,7 +195,6 @@ func TestContainerSnapshot_TableDriven(t *testing.T) {
 				MemoryPercentage: 75.2,
 				Status:           model.StatusRunning,
 				PendingAction:    "",
-				Logs:             []string{"log1", "log2"},
 			},
 		},
 		{
@@ -270,7 +208,6 @@ func TestContainerSnapshot_TableDriven(t *testing.T) {
 				MemoryPercentage: 0,
 				Status:           model.StatusExited,
 				PendingAction:    "stopping",
-				logs:             []string{},
 			},
 			expected: model.Container{
 				ID:               model.ContainerID("test-id"),
@@ -281,7 +218,6 @@ func TestContainerSnapshot_TableDriven(t *testing.T) {
 				MemoryPercentage: 0,
 				Status:           model.StatusExited,
 				PendingAction:    "stopping",
-				Logs:             []string{},
 			},
 		},
 	}
@@ -304,9 +240,6 @@ func TestContainerSnapshot_TableDriven(t *testing.T) {
 			}
 			if snapshot.PendingAction != tt.expected.PendingAction {
 				t.Errorf("Snapshot PendingAction = %v, want %v", snapshot.PendingAction, tt.expected.PendingAction)
-			}
-			if len(snapshot.Logs) != len(tt.expected.Logs) {
-				t.Errorf("Snapshot Logs length = %d, want %d", len(snapshot.Logs), len(tt.expected.Logs))
 			}
 		})
 	}
@@ -376,7 +309,7 @@ func TestNewContainer_TableDriven(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			c, err := NewContainer(ctx, tt.summary, tt.action, tt.project, 1000)
+			c, err := NewContainer(ctx, tt.summary, tt.action, tt.project)
 
 			if err != nil {
 				t.Errorf("NewContainer() unexpected error: %v", err)

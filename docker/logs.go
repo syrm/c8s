@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	apiContainer "github.com/docker/docker/api/types/container"
@@ -15,7 +16,7 @@ import (
 	"github.com/syrm/c8s/internal/model"
 )
 
-func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
+func (d *Docker) collectContainerLogs(ctx context.Context, c *Container, logChan chan<- []string) {
 	if c == nil {
 		return
 	}
@@ -33,6 +34,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 		c.LogCollectionActive = false
 		c.mu.Unlock()
 	}()
+	defer close(logChan)
 
 	// Open the log stream from Docker
 	logStream, err := d.openLogStream(ctx, c)
@@ -42,7 +44,7 @@ func (d *Docker) collectContainerLogs(ctx context.Context, c *Container) {
 	defer logStream.Close()
 
 	// Process the log stream
-	d.processLogStream(ctx, c, logStream)
+	d.processLogStream(ctx, c, logStream, logChan)
 }
 
 // cleanupLogContext removes the log context entry for a container.
@@ -54,14 +56,20 @@ func (d *Docker) cleanupLogContext(containerID model.ContainerID) {
 
 // openLogStream opens a log stream for a container.
 func (d *Docker) openLogStream(ctx context.Context, c *Container) (io.ReadCloser, error) {
-	since := time.Now().Add(-d.cfg.LogHistory).Format(time.RFC3339)
-	out, err := d.client.ContainerLogs(ctx, string(c.ID), apiContainer.LogsOptions{
+	opts := apiContainer.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Timestamps: true,
 		Follow:     true,
-		Since:      since,
-	})
+		Tail:       d.cfg.LogTail,
+	}
+
+	// If LogHistory > 0, also add Since to limit by time
+	if d.cfg.LogHistory > 0 {
+		opts.Since = time.Now().Add(-d.cfg.LogHistory).Format(time.RFC3339)
+	}
+
+	out, err := d.client.ContainerLogs(ctx, string(c.ID), opts)
 	if err != nil {
 		d.logger.ErrorContext(ctx, "container logs failed",
 			slog.String("container_id", string(c.ID)),
@@ -74,8 +82,8 @@ func (d *Docker) openLogStream(ctx context.Context, c *Container) (io.ReadCloser
 	return out, nil
 }
 
-// processLogStream processes a Docker log stream and sends lines to the container.
-func (d *Docker) processLogStream(ctx context.Context, c *Container, logStream io.ReadCloser) {
+// processLogStream processes a Docker log stream and sends line batches to the TUI via logChan.
+func (d *Docker) processLogStream(ctx context.Context, c *Container, logStream io.ReadCloser, logChan chan<- []string) {
 	pr, pw := io.Pipe()
 
 	g, egCtx := errgroup.WithContext(ctx)
@@ -93,13 +101,27 @@ func (d *Docker) processLogStream(ctx context.Context, c *Container, logStream i
 		return nil
 	})
 
-	// Goroutine 2: Read lines from Pipe and append to container
+	// Goroutine 2: Read lines from Pipe and send batches to TUI
 	g.Go(func() error {
 		defer pr.Close()
-		reader := bufio.NewReader(pr)
+		reader := bufio.NewReaderSize(pr, 64*1024)
+		var batch []string
 		for {
 			line, err := reader.ReadString('\n')
+			if line != "" {
+				line = strings.TrimRight(line, "\n")
+				batch = append(batch, line)
+			}
+
 			if err != nil {
+				// Send remaining batch before exit
+				if len(batch) > 0 {
+					select {
+					case logChan <- batch:
+					case <-egCtx.Done():
+						return egCtx.Err()
+					}
+				}
 				if !errors.Is(err, io.EOF) {
 					d.logger.ErrorContext(egCtx, "end of container logs with error",
 						slog.String("container_id", string(c.ID)),
@@ -109,12 +131,14 @@ func (d *Docker) processLogStream(ctx context.Context, c *Container, logStream i
 				return nil
 			}
 
-			// Check context
-			select {
-			case <-egCtx.Done():
-				return egCtx.Err()
-			default:
-				c.AppendLog(line)
+			// Send batch when it reaches a reasonable size or when no more data is immediately available
+			if len(batch) >= 100 || reader.Buffered() == 0 {
+				select {
+				case logChan <- batch:
+					batch = nil
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
 			}
 		}
 	})

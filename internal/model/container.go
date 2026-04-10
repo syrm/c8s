@@ -21,7 +21,6 @@ type Container struct {
 	Name             string
 	CPUPercentage    float64
 	MemoryPercentage float64
-	Logs             []string
 	Status           string
 	PendingAction    string // "starting", "stopping", "restarting", "removing" or ""
 }

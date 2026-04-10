@@ -271,23 +271,7 @@ func TestContainerSnapshotConcurrency(t *testing.T) {
 	const numGoroutines = 50
 
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 2)
-
-	// Writers - append logs
-	for i := 0; i < numGoroutines; i++ {
-		go func(gid int) {
-			defer wg.Done()
-			for j := 0; j < 100; j++ {
-				c.AppendLog("log line from goroutine")
-
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-			}
-		}(i)
-	}
+	wg.Add(numGoroutines)
 
 	// Readers - take snapshots
 	for i := 0; i < numGoroutines; i++ {
@@ -412,26 +396,6 @@ func TestStatsGenConcurrency(t *testing.T) {
 	}
 }
 
-// TestContainerAppendLogLimit tests that log buffer respects the limit.
-func TestContainerAppendLogLimit(t *testing.T) {
-	t.Parallel()
-	const testMaxLogLines = 1000
-	c := &Container{
-		ID:          "test-container",
-		maxLogLines: testMaxLogLines,
-	}
-
-	// Append more than maxLogLines
-	for i := 0; i < testMaxLogLines+500; i++ {
-		c.AppendLog("log line")
-	}
-
-	logCount := c.LogsLen()
-	if logCount > testMaxLogLines {
-		t.Errorf("Expected at most %d logs, got %d", testMaxLogLines, logCount)
-	}
-}
-
 // TestContainerDelete tests that Delete properly cleans up resources.
 func TestContainerDelete(t *testing.T) {
 	t.Parallel()
@@ -441,7 +405,6 @@ func TestContainerDelete(t *testing.T) {
 	c := &Container{
 		ID:     "test-container",
 		cancel: cancel,
-		logs:   []string{"log1", "log2"},
 	}
 
 	c.Delete()
@@ -452,11 +415,6 @@ func TestContainerDelete(t *testing.T) {
 		// Expected
 	default:
 		t.Error("Expected context to be cancelled after Delete()")
-	}
-
-	// Verify logs were cleared
-	if c.LogsLen() != 0 {
-		t.Errorf("Expected 0 logs after Delete(), got %d", c.LogsLen())
 	}
 }
 

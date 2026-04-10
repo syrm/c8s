@@ -98,20 +98,38 @@ func (m *Model) fetchContainersCmd() tea.Cmd {
 	}
 }
 
-// fetchContainerLogCmd fetches logs for the current container.
-func (m *Model) fetchContainerLogCmd() tea.Cmd {
+// startLogStreamCmd sends a log request to Docker and returns logStartedMsg.
+// The logChan is stored on the Model for waitForLogLines to read from.
+func (m *Model) startLogStreamCmd() tea.Cmd {
 	containerID := m.containerID
+	logChan := m.logChan
 	return func() tea.Msg {
 		response := make(chan model.Container, 1)
-		if !m.sendRequest(&model.RequestContainerLog{ContainerID: model.ContainerID(containerID), Response: response}) {
-			return containerLogMsg{found: false}
+		if !m.sendRequest(&model.RequestContainerLog{
+			ContainerID: model.ContainerID(containerID),
+			Response:    response,
+			LogChan:     logChan,
+		}) {
+			return logStartedMsg{found: false}
 		}
 
 		c, ok := awaitResponse(response)
 		if !ok {
-			return containerLogMsg{found: false}
+			return logStartedMsg{found: false}
 		}
-		return containerLogMsg{container: c, found: c.ID != ""}
+		return logStartedMsg{container: c, found: c.ID != ""}
+	}
+}
+
+// waitForLogLines reads the next batch of lines from the log channel.
+// Returns logLinesMsg on data, logStreamDoneMsg when the channel closes.
+func waitForLogLines(ch <-chan []string) tea.Cmd {
+	return func() tea.Msg {
+		lines, ok := <-ch
+		if !ok {
+			return logStreamDoneMsg{}
+		}
+		return logLinesMsg(lines)
 	}
 }
 

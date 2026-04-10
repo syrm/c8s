@@ -65,7 +65,7 @@ func (d *Docker) handleRequestContainerLog(ctx context.Context, r *model.Request
 	c.mu.Unlock()
 
 	if needStart {
-		d.startLogCollection(c)
+		d.startLogCollection(c, r.LogChan)
 	}
 
 	r.Response <- snap
@@ -159,7 +159,7 @@ func (d *Docker) stopStatsCollection(containerID model.ContainerID) {
 }
 
 // startLogCollection starts log collection for a container if not already active.
-func (d *Docker) startLogCollection(c *Container) {
+func (d *Docker) startLogCollection(c *Container, logChan chan<- []string) {
 	d.logContextsLock.Lock()
 	// Cancel any existing log collection for this container
 	if oldCancel, exists := d.logContexts[c.ID]; exists {
@@ -176,6 +176,6 @@ func (d *Docker) startLogCollection(c *Container) {
 	d.logCollectorsWG.Add(1)
 	go func() {
 		defer d.logCollectorsWG.Done()
-		d.collectContainerLogs(ctxLog, c)
+		d.collectContainerLogs(ctxLog, c, logChan)
 	}()
 }

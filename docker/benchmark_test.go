@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
 	apiContainer "github.com/docker/docker/api/types/container"
@@ -12,24 +11,6 @@ import (
 
 	"github.com/syrm/c8s/internal/model"
 )
-
-// BenchmarkContainerAppendLog tests the performance of log appending.
-// This is a hot path in the application as logs are continuously streamed.
-func BenchmarkContainerAppendLog(b *testing.B) {
-	c := &Container{
-		logs:        make([]string, 0, 1000),
-		maxLogLines: 1000,
-	}
-
-	line := "2024-03-29T10:00:00.000Z [INFO] This is a sample log line that might be typical in a container output"
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		c.AppendLog(line)
-	}
-}
 
 // BenchmarkContainerSnapshot tests the performance of creating container snapshots.
 // Snapshots are created frequently to update the TUI.
@@ -44,12 +25,6 @@ func BenchmarkContainerSnapshot(b *testing.B) {
 		Status:              model.StatusRunning,
 		PendingAction:       "",
 		LogCollectionActive: true,
-		logs:                make([]string, 1000),
-	}
-
-	// Fill logs with sample data
-	for i := 0; i < 1000; i++ {
-		c.logs[i] = fmt.Sprintf("Log line %d", i)
 	}
 
 	b.ResetTimer()
@@ -132,33 +107,6 @@ func BenchmarkStatusFromAction(b *testing.B) {
 	}
 }
 
-// BenchmarkContainerLogTruncate tests the performance of log buffer truncation.
-// This happens when the log buffer reaches its maximum size.
-func BenchmarkContainerLogTruncate(b *testing.B) {
-	c := &Container{
-		logs:        make([]string, 0, 1000),
-		maxLogLines: 1000,
-	}
-
-	// Fill to near capacity
-	for i := 0; i < 999; i++ {
-		c.logs = append(c.logs, fmt.Sprintf("Log line %d", i))
-	}
-
-	line := "2024-03-29T10:00:00.000Z [INFO] This is a sample log line that triggers truncation"
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		c.AppendLog(line)
-		// Reset for next iteration
-		if len(c.logs) > 1000 {
-			c.logs = c.logs[:999]
-		}
-	}
-}
-
 // BenchmarkParallelContainerAccess tests concurrent access to container data.
 // Multiple goroutines may access container data simultaneously.
 func BenchmarkParallelContainerAccess(b *testing.B) {
@@ -172,7 +120,6 @@ func BenchmarkParallelContainerAccess(b *testing.B) {
 		Status:              model.StatusRunning,
 		PendingAction:       "",
 		LogCollectionActive: true,
-		logs:                make([]string, 100),
 	}
 
 	b.ResetTimer()
@@ -232,7 +179,6 @@ func BenchmarkMemoryUsage(b *testing.B) {
 			Status:              model.StatusRunning,
 			PendingAction:       "",
 			LogCollectionActive: i%2 == 0,
-			logs:                make([]string, i%1000),
 		}
 	}
 
@@ -241,33 +187,4 @@ func BenchmarkMemoryUsage(b *testing.B) {
 
 	b.ReportMetric(float64(m2.Alloc-m1.Alloc)/1024, "KB/container")
 	b.ReportMetric(float64(m2.Alloc-m1.Alloc)/float64(len(containers)), "bytes/each")
-}
-
-// BenchmarkConcurrentLogProcessing simulates concurrent log processing.
-func BenchmarkConcurrentLogProcessing(b *testing.B) {
-	c := &Container{
-		logs:        make([]string, 0, 1000),
-		maxLogLines: 1000,
-	}
-
-	const numGoroutines = 10
-	const logsPerGoroutine = 100
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		var wg sync.WaitGroup
-		wg.Add(numGoroutines)
-
-		for j := 0; j < numGoroutines; j++ {
-			go func(id int) {
-				defer wg.Done()
-				for k := 0; k < logsPerGoroutine; k++ {
-					c.AppendLog(fmt.Sprintf("Goroutine %d log %d", id, k))
-				}
-			}(j)
-		}
-
-		wg.Wait()
-	}
 }
