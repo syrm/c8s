@@ -2,189 +2,191 @@ package docker
 
 import (
 	"context"
-	"errors"
-	"log/slog"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	apiContainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 
-	"github.com/syrm/c8s/dto"
+	"github.com/syrm/c8s/internal/model"
 )
 
-type ContainerID string
-
+// Container represents a Docker container with its state and metrics.
+// Access is protected by mu for thread-safety.
 type Container struct {
-	ID               ContainerID
-	Service          string
-	Name             string
-	Project          dto.ContainerProject
-	CPUPercentage    float64
-	MemoryPercentage float64
-	IsRunning        bool
-	Command          chan ContainerCommand
-	cancel           context.CancelFunc
-	logger           *slog.Logger
+	ID                  model.ContainerID
+	Service             string
+	Name                string
+	Project             model.ContainerProject
+	CPUPercentage       float64
+	MemoryPercentage    float64
+	Status              string
+	PendingAction       string
+	LogCollectionActive bool
+
+	mu sync.RWMutex
+
+	// ctx is the container's context, derived from the parent context.
+	// Used for cancellation propagation.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// statsGen tracks the current generation of stats goroutine
+	statsGen atomic.Uint64
 }
 
-type ContainerResponse struct {
-	ID               ContainerID
-	Project          dto.ContainerProject
-	Service          string
-	Name             string
-	CPUPercentage    float64
-	MemoryPercentage float64
-	IsRunning        bool
-}
-
-type ContainerCommand struct {
-	functor  func(*Container)
-	response chan ContainerResponse
-}
-
+// NewContainer creates a new Container from a Docker API container summary.
+// Returns an error if the context is already cancelled.
 func NewContainer(
 	ctx context.Context,
 	dockerContainer apiContainer.Summary,
 	action events.Action,
-	project dto.ContainerProject,
-	logger *slog.Logger,
-) *Container {
-	ctx, cancel := context.WithCancel(ctx)
+	project model.ContainerProject,
+) (*Container, error) {
+	// Don't create container if context is already cancelled
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("cannot create container: %w", ctx.Err())
+	}
 
-	c := &Container{
-		ID:      ContainerID(dockerContainer.ID),
+	// Create a child context for the container
+	// This allows proper cancellation propagation when the parent context is cancelled
+	childCtx, cancel := context.WithCancel(ctx)
+
+	status := dockerContainer.State
+	if status == "" {
+		status = statusFromAction(action)
+	}
+	if status == "" {
+		status = model.StatusCreated
+	}
+
+	containerName := ""
+	if len(dockerContainer.Names) > 0 {
+		containerName = strings.TrimPrefix(dockerContainer.Names[0], "/")
+	}
+
+	return &Container{
+		ID:      model.ContainerID(dockerContainer.ID),
 		Service: dockerContainer.Labels["com.docker.compose.service"],
-		Name:    dockerContainer.Names[0],
-		Command: make(chan ContainerCommand),
+		Name:    containerName,
 		Project: project,
+		ctx:     childCtx,
 		cancel:  cancel,
-		logger:  logger,
-	}
-
-	isRunning, err := isRunningFromAction(action)
-
-	if err == nil {
-		c.IsRunning = isRunning
-	}
-
-	go c.handleCommands(ctx)
-
-	return c
+		Status:  status,
+	}, nil
 }
 
-func (c *Container) handleCommands(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case cmd := <-c.Command:
-			if cmd.functor != nil {
-				cmd.functor(c)
-			}
+// Snapshot returns a copy of the container state as a model.Container.
+func (c *Container) Snapshot() model.Container {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
-			if cmd.response != nil {
-				cmd.response <- ContainerResponse{
-					ID:               c.ID,
-					Project:          c.Project,
-					Name:             c.Name,
-					Service:          c.Service,
-					CPUPercentage:    c.CPUPercentage,
-					MemoryPercentage: c.MemoryPercentage,
-					IsRunning:        c.IsRunning,
-				}
-			}
-		}
+	return model.Container{
+		ID:               c.ID,
+		Project:          c.Project,
+		Service:          c.Service,
+		Name:             c.Name,
+		CPUPercentage:    c.CPUPercentage,
+		MemoryPercentage: c.MemoryPercentage,
+		Status:           c.Status,
+		PendingAction:    c.PendingAction,
 	}
 }
 
+// Delete cancels the container's context and clears resources.
 func (c *Container) Delete() {
-	c.cancel()
+	if c.cancel != nil {
+		c.cancel()
+	}
 }
 
-func (c *Container) setRunningStateFromState(containerState apiContainer.ContainerState) {
-	c.IsRunning = containerState == apiContainer.StateRunning
+func (c *Container) SetStatusFromAction(action events.Action) {
+	newStatus := statusFromAction(action)
+	if newStatus != "" {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.Status = newStatus
+		c.PendingAction = ""
+	}
 }
 
-func (c *Container) SetRunningStateFromAction(action events.Action) {
-	isRunning, err := isRunningFromAction(action)
+func (c *Container) SetPendingAction(action string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	if err != nil {
-		return
+	// Only allow valid pending actions
+	switch action {
+	case "", "starting", "stopping", "restarting", "removing":
+		c.PendingAction = action
 	}
-
-	c.IsRunning = isRunning
 }
 
-func isRunningFromAction(action events.Action) (bool, error) {
-	if action == events.ActionCreate ||
-		action == events.ActionStart ||
-		action == events.ActionUnPause ||
-		action == events.ActionRestart ||
-		action == events.ActionReload {
-		return true, nil
-	}
+func (c *Container) SetStatus(status string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Status = status
+}
 
-	if action == events.ActionDie ||
-		action == events.ActionStop ||
-		action == events.ActionPause ||
-		action == events.ActionKill ||
-		action == events.ActionOOM ||
-		action == events.ActionRemove ||
-		action == events.ActionDelete ||
-		action == events.ActionDestroy {
-		return false, nil
+// statusFromAction returns the container status based on a Docker event action.
+func statusFromAction(action events.Action) string {
+	switch action {
+	case events.ActionStart, events.ActionUnPause, events.ActionReload:
+		return model.StatusRunning
+	case events.ActionStop, events.ActionDie, events.ActionKill, events.ActionOOM:
+		return model.StatusExited
+	case events.ActionPause:
+		return model.StatusPaused
+	case events.ActionRestart:
+		return model.StatusRestarting
+	case events.ActionCreate:
+		return model.StatusCreated
+	case events.ActionRemove, events.ActionDelete, events.ActionDestroy:
+		return model.StatusRemoving
+	default:
+		return ""
 	}
-
-	return true, errors.New("invalid action")
 }
 
 func (c *Container) Update(stats apiContainer.StatsResponse) {
-	c.updateCPUPercent(stats.CPUStats, stats.PreCPUStats)
-	c.updateMemoryPercentage(stats.MemoryStats)
+	cpu, mem := c.calculateStats(stats)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.CPUPercentage = cpu
+	c.MemoryPercentage = mem
 }
 
-func (c *Container) updateMemoryPercentage(memoryStats apiContainer.MemoryStats) {
-	memUsage := c.calculateMemUsageUnixNoCache(memoryStats)
-	c.MemoryPercentage = c.calculateMemPercentUnixNoCache(float64(memoryStats.Limit), memUsage)
-}
-
-func (c *Container) calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) float64 {
-	// https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go
-	// cgroup v1
-	if v, isCgroup1 := mem.Stats["total_inactive_file"]; isCgroup1 && v < mem.Usage {
-		return float64(mem.Usage - v)
-	}
-	// cgroup v2
-	if v := mem.Stats["inactive_file"]; v < mem.Usage {
-		return float64(mem.Usage - v)
-	}
-	return float64(mem.Usage)
-}
-
-func (c *Container) calculateMemPercentUnixNoCache(limit float64, usedNoCache float64) float64 {
-	// https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go
-	if limit != 0 {
-		return usedNoCache / limit * 100.0
-	}
-	return 0
-}
-
-func (c *Container) updateCPUPercent(cpuStats apiContainer.CPUStats, preCPUStats apiContainer.CPUStats) {
-	// https://github.com/docker/cli/blob/master/cli/command/container/stats_helpers.go
-	var (
-		cpuPercent = 0.0
-		// calculate the change for the cpu usage of the container in between readings
-		cpuDelta = float64(cpuStats.CPUUsage.TotalUsage) - float64(preCPUStats.CPUUsage.TotalUsage)
-		// calculate the change for the entire system between readings
-		systemDelta = float64(cpuStats.SystemUsage) - float64(preCPUStats.SystemUsage)
-		onlineCPUs  = float64(cpuStats.OnlineCPUs)
-	)
-
+func (c *Container) calculateStats(stats apiContainer.StatsResponse) (float64, float64) {
+	// CPU
+	cpuPercent := 0.0
+	cpuDelta := float64(stats.CPUStats.CPUUsage.TotalUsage) - float64(stats.PreCPUStats.CPUUsage.TotalUsage)
+	systemDelta := float64(stats.CPUStats.SystemUsage) - float64(stats.PreCPUStats.SystemUsage)
+	onlineCPUs := float64(stats.CPUStats.OnlineCPUs)
 	if onlineCPUs == 0.0 {
-		onlineCPUs = float64(len(cpuStats.CPUUsage.PercpuUsage))
+		onlineCPUs = float64(len(stats.CPUStats.CPUUsage.PercpuUsage))
 	}
 	if systemDelta > 0.0 && cpuDelta > 0.0 {
 		cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100.0
 	}
 
-	c.CPUPercentage = cpuPercent
+	// Memory
+	memUsage := calculateMemUsageUnixNoCache(stats.MemoryStats)
+	memPercent := 0.0
+	if stats.MemoryStats.Limit != 0 {
+		memPercent = memUsage / float64(stats.MemoryStats.Limit) * 100.0
+	}
+
+	return cpuPercent, memPercent
+}
+
+func calculateMemUsageUnixNoCache(mem apiContainer.MemoryStats) float64 {
+	if v, isCgroup1 := mem.Stats["total_inactive_file"]; isCgroup1 && v < mem.Usage {
+		return float64(mem.Usage - v)
+	}
+	if v := mem.Stats["inactive_file"]; v < mem.Usage {
+		return float64(mem.Usage - v)
+	}
+	return float64(mem.Usage)
 }
